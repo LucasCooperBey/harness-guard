@@ -1,0 +1,43 @@
+{
+  "_comment": "Merge this 'hooks' block into ~/.claude/settings.json. Hooks live in ~/.claude/hooks after running ./install.sh. Remove any hook line you don't want.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "WebFetch|WebSearch|mcp__exa__.*|mcp__apify__.*|mcp__ref__ref_read_url|.*Gmail__send.*|.*create_draft",
+        "hooks": [
+          { "type": "command", "command": "$HOME/.claude/hooks/egress-guard.sh" }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "$HOME/.claude/hooks/block-destructive.sh" },
+          { "type": "command", "command": "$HOME/.claude/hooks/pre-commit-quality-gate.sh" }
+        ]
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          { "type": "command", "command": "$HOME/.claude/hooks/readonly-scope-guard.sh" },
+          { "type": "command", "command": "$HOME/.claude/hooks/config-protection.sh" }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          { "type": "command", "command": "$HOME/.claude/hooks/no-any-types.sh" },
+          { "type": "command", "command": "$HOME/.claude/hooks/no-console-log.sh" }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "$HOME/.claude/hooks/verify-integrity.sh verify" }
+        ]
+      }
+    ]
+  }
+}
