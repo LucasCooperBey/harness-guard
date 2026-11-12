@@ -21,7 +21,10 @@ if [ ! -f "$PROJECT_ROOT/package.json" ]; then
   exit 0  # No package.json, skip checks
 fi
 
-cd "$PROJECT_ROOT"
+if ! cd "$PROJECT_ROOT"; then
+  echo "pre-commit-quality-gate: could not enter $PROJECT_ROOT, so tests, lint and typecheck did not run." >&2
+  exit 0
+fi
 
 ERRORS=""
 

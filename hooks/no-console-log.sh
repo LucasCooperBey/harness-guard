@@ -29,15 +29,15 @@ fi
 MATCHES=$(grep -n 'console\.log' "$FILE_PATH" | head -5)
 
 if [ -n "$MATCHES" ]; then
-  # Non-blocking: output as JSON additionalContext (exit 0, not exit 2)
-  python3 -c "
-import json
-msg = '''Found console.log in ${FILE_PATH} — consider removing before commit:
-${MATCHES}
-
-Use a proper logger or remove debug statements.'''
-print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PostToolUse', 'additionalContext': msg}}))
-"
+  # Non-blocking: output as JSON additionalContext (exit 0, not exit 2).
+  # The path and the matched lines reach Python as environment values, never as source text,
+  # so a line in the file cannot run code here.
+  FILE_PATH="$FILE_PATH" MATCHES="$MATCHES" python3 -c '
+import json, os
+msg = ("Found console.log in " + os.environ["FILE_PATH"] + ". Consider removing it before commit:\n"
+       + os.environ["MATCHES"] + "\n\nUse a proper logger or remove debug statements.")
+print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": msg}}))
+'
 fi
 
 exit 0

@@ -1,19 +1,19 @@
 # HarnessGuard
 
-**Eight drop-in [Claude Code](https://claude.com/claude-code) hooks that make an autonomous coding agent safe to leave running.** Guardrails for exfiltration, destructive commands, write-scope, and code quality — each one a small, auditable shell script with zero dependencies beyond `jq` + `python3` (already on most dev machines).
+Eight Claude Code hooks that guard an autonomous coding agent. They cover exfiltration, destructive commands, write scope, and code quality. Each one is a small shell script. The only dependencies are `jq` and `python3`.
 
-These are PreToolUse / PostToolUse hooks: Claude Code runs them *before* (or after) a tool call and a non-zero exit **blocks the call**. No network, no telemetry, no secrets — they read the tool payload on stdin and decide allow/block.
+These are PreToolUse and PostToolUse hooks. Claude Code runs them before or after a tool call. A hook blocks only with exit code 2. Any other exit, including exit 1, is a non-blocking error, and Claude Code still runs the tool call. Exit 0 allows the call. The hooks do not use the network, do not send telemetry, and do not contain secrets. They read the tool payload on stdin and decide allow or block.
 
 ## Why
 
-An agent with shell + web + file access can, in a single bad turn, leak a credential, `rm -rf` the wrong directory, force-push `main`, or weaken your linter to make an error "go away." HarnessGuard closes those holes structurally — the agent *cannot* do the dangerous thing, regardless of what a prompt (or a prompt injection) tells it to do.
+An agent with shell, web, and file access can leak a credential, delete the wrong directory, force-push `main`, or weaken a linter so an error disappears. These hooks refuse those calls before they run.
 
 ## The hooks
 
 | Hook | Event | What it blocks |
 |---|---|---|
-| **egress-guard.sh** | PreToolUse (web/email/fetch) | Data exfiltration. SEND tools → domain allow-list (fail-closed). SEARCH/FETCH → blocks secret-shaped strings (keys, `op://`, private keys) smuggled into a query/URL. Reading pages stays open so research isn't broken. |
-| **block-destructive.sh** | PreToolUse (Bash) | `rm -rf /` or `~`, force-push to main/master, `DROP TABLE`/`TRUNCATE`, pipe-to-shell (`curl … \| bash`), `chmod 777`, writes to `/etc`. Optional `HARNESS_GUARD_PROTECT` env to fence irreplaceable dirs. |
+| **egress-guard.sh** | PreToolUse (web/email/fetch) | Data leaving the machine. SEND tools must target a domain on the allow-list, and a destination the hook cannot read is blocked. SEARCH and FETCH stay open for reading, and are blocked when the query or URL carries secret-shaped text (keys, `op://`, private keys). |
+| **block-destructive.sh** | PreToolUse (Bash) | `rm -rf /` or `~`, force-push to main/master, `DROP TABLE`/`TRUNCATE`, pipe-to-shell (`curl ... \| bash`), `chmod 777`, writes to `/etc`. Optional `HARNESS_GUARD_PROTECT` env to fence irreplaceable dirs. |
 | **readonly-scope-guard.sh** | PreToolUse (Edit/Write) | Out-of-scope writes. Two modes via marker files: **read-only** (deny all writes) and **scope-guard** (writes must fall inside a declared allow-list, minus an exclude-list). Inert when no marker is present. |
 | **config-protection.sh** | PreToolUse (Edit/Write) | Edits that weaken tooling: ESLint/Biome/Prettier/Ruff configs, or relaxing `tsconfig` strict flags (`strict:false`, `noImplicitAny:false`, `skipLibCheck:true`). Override with `ECC_ALLOW_CONFIG_EDIT=1`. |
 | **no-any-types.sh** | PostToolUse (Edit/Write) | `: any` introduced into TypeScript (skips tests). Escape hatch: `// any-ok`. |
@@ -24,26 +24,47 @@ An agent with shell + web + file access can, in a single bad turn, leak a creden
 ## Install
 
 ```bash
-git clone https://github.com/Lucface/harness-guard.git
+git clone https://github.com/LucasCooperBey/harness-guard.git
 cd harness-guard
-./install.sh          # copies hooks to ~/.claude/hooks and prints the settings snippet
+./install.sh
 ```
 
-Then merge the `hooks` block from [`settings.example.json`](./settings.example.json) into your `~/.claude/settings.json`. Restart Claude Code. That's it.
+Then merge the `hooks` block from [`settings.example.json`](./settings.example.json) into `~/.claude/settings.json`. Restart Claude Code.
 
 ### Customize
 
-- **Allow-list** for outbound sends: `~/.claude/allowlist-domains.txt` (one domain per line; auto-created with sensible defaults).
-- **Protect dirs** from deletion: `export HARNESS_GUARD_PROTECT="my-backups|wedding-photos"`.
-- Hooks are plain bash — read them, they're short. Delete any you don't want.
+- Allow-list for outbound sends: `~/.claude/allowlist-domains.txt` (one domain per line; a line that starts with `#` is a comment). The hook creates it on first use holding comments only, so every send is blocked until you add the domains you send to, for example `example.com`. A domain also allows its subdomains.
+- Protect directories from deletion: `export HARNESS_GUARD_PROTECT="my-backups|wedding-photos"`.
+- Known-bad fetch domains: `~/.claude/blocklist-domains.txt`, one per line. While it holds a domain, a fetch whose host has a character outside a-z, 0-9, dot and hyphen is blocked too, since an escaped name could hide a listed domain.
+- The hooks are plain bash. Read them. Delete any you do not want.
+
+### What egress-guard reads
+
+- Recipients come from fields named `to`, `cc`, `bcc`, `recipient(s)`, `email(s)` or `address(es)`, or `to`, `cc` or `bcc` joined to one of those (`toRecipients`, `cc_addresses`), at any depth and in any case. Every address in them must be on the allow-list. `from`, `sender` and `reply_to` are not destinations.
+- URLs come from `url`, `params.url`, each `urls` entry, `input.url`, each `input.startUrls` URL and `request.url`. A SEND needs every URL host on the allow-list. A FETCH checks every URL for secrets and against the blocklist.
+- A SEND tool with no recipient field and no URL is blocked, because the hook cannot tell where it goes. Slack posts and Notion pages are in that group. If you trust a tool like that, take it out of the egress-guard matcher in `settings.json`.
+- A tool that names its destination only in a field not listed here is read as having no destination, so it is blocked. The hook cannot know every tool's schema, so it fails closed instead of guessing.
+
+## Updating from an earlier copy
+
+Earlier copies of `egress-guard.sh` exited 1 and only warned, so Claude Code still ran the call. Re-run `install.sh` or copy the hook again.
 
 ## Design principles
 
-1. **Fail closed on the exfil leg.** If `egress-guard` can't read where a SEND is going, it blocks.
-2. **Don't break the inbound path.** Fetching/reading pages is allowed — only *secrets leaving* are stopped — so research and browsing still work.
-3. **Inert until armed.** `readonly-scope-guard` does nothing unless you drop a marker file, so it never surprises you.
-4. **Structural, not advisory.** A blocked tool call is blocked. The agent can't talk its way past a non-zero exit.
+1. **Fail closed on the exfil leg.** If `egress-guard` cannot read where a SEND is going, it blocks.
+2. **Leave the inbound path open.** Fetching and reading pages is allowed. Only secrets leaving in a URL or query are stopped.
+3. **Inert until armed.** `readonly-scope-guard` does nothing unless you drop a marker file.
+4. **A hook blocks only with exit 2.** Exit 1 does not block the tool call.
+
+## Tests
+
+```bash
+bash tests/run.sh
+```
 
 ## License
 
-MIT — see [LICENSE](./LICENSE). Built by [@Lucface](https://github.com/Lucface). PRs welcome.
+MIT. See [LICENSE](./LICENSE). Built by [LucasCooperBey](https://github.com/LucasCooperBey).
+
+Made by Lucas Cooper-Bey for 100 Doors, one free tool a day: https://sandiegoaistudio.com/season
+If you like seeing how other builders guard their agents, San Diego AI Studio runs Sharathon, where people show their own setups: https://www.skool.com/sandiegoaistudio

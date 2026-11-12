@@ -38,7 +38,7 @@ case "$COMMAND" in
     echo "BLOCKED: Destructive SQL operation. Use a migration instead." >&2
     exit 2
     ;;
-  *"curl "*"|"*"sh"*|*"curl "*"| "*"bash"*|*"wget "*"|"*"sh"*|*"wget "*"| "*"bash"*)
+  *"curl "*"|"*"sh"*|*"wget "*"|"*"sh"*)
     echo "BLOCKED: Pipe-to-shell detected. Download and inspect scripts before running." >&2
     exit 2
     ;;

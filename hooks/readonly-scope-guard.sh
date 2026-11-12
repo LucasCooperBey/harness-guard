@@ -1,10 +1,10 @@
 #!/bin/bash
 # Read-Only + Scope-Guard enforcement  (PreToolUse: Edit|Write|MultiEdit|NotebookEdit)
-# Ports Dan Mercede's `readonly` + `scope-guard` skill CONTRACTS into a hard structural rail.
+# Turns a read-only mode and a write-scope mode into a hard rail on file writes.
 # Markers (ABSENT by default => hook is inert/safe):
 #   ~/.claude/state/readonly.json    {"active":true,"reason":"..."}
 #   ~/.claude/state/scope-guard.json {"active":true,"scope":"...","allowed":[...],"excluded":[...]}
-# Manage markers via ~/.claude/scripts/readonly-mode.sh  and  ~/.claude/scripts/scope-guard.sh
+# Arm a mode by writing its marker file; clear it by deleting the file.
 # Exit 2 = DENY (stderr shown to the model). Exit 0 = allow.
 
 STATE="$HOME/.claude/state"
@@ -21,7 +21,7 @@ is_active() { [ -f "$1" ] && [ "$(jq -r '.active // false' "$1" 2>/dev/null)" = 
 # ---- READ-ONLY MODE: deny ALL file writes ----
 if is_active "$RO"; then
   REASON=$(jq -r '.reason // "read-only session"' "$RO" 2>/dev/null)
-  echo "BLOCKED (read-only mode): file writes are denied this session — ${REASON}. Clear with: ~/.claude/scripts/readonly-mode.sh off" >&2
+  echo "BLOCKED (read-only mode): file writes are denied this session (${REASON}). Stop and tell the user; only they can turn read-only mode off." >&2
   exit 2
 fi
 

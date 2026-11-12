@@ -30,7 +30,7 @@ fi
 MATCHES=$(grep -n ': any' "$FILE_PATH" | grep -v '// eslint-disable' | grep -v '// @ts-ignore' | grep -v '// any-ok' | head -10)
 
 if [ -n "$MATCHES" ]; then
-  echo "Found \`any\` type in ${FILE_PATH} — use proper typing instead:" >&2
+  echo "Found \`any\` type in ${FILE_PATH}. Use proper typing instead:" >&2
   echo "$MATCHES" >&2
   echo "" >&2
   echo "Use: unknown with type guards, generics, or specific types." >&2

@@ -1,4 +1,4 @@
-# Runtime artifacts — never commit
+# Runtime artifacts, never commit
 *.log
 .integrity
 allowlist-domains.txt
