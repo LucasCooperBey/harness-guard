@@ -40,8 +40,8 @@ Then merge the `hooks` block from [`settings.example.json`](./settings.example.j
 
 ### What egress-guard reads
 
-- Recipients come from fields named `to`, `cc`, `bcc`, `recipient(s)`, `email(s)` or `address(es)`, or `to`, `cc` or `bcc` joined to one of those (`toRecipients`, `cc_addresses`), at any depth and in any case. Every address in them must be on the allow-list. `from`, `sender` and `reply_to` are not destinations.
-- URLs come from `url`, `params.url`, each `urls` entry, `input.url`, each `input.startUrls` URL and `request.url`. A SEND needs every URL host on the allow-list. A FETCH checks every URL for secrets and against the blocklist.
+- Recipients come from fields named `to`, `cc`, `bcc`, `recipient(s)`, `email(s)` or `address(es)`, or `to`, `cc` or `bcc` joined to one of those (`toRecipients`, `cc_addresses`), at any depth and in any case. Any other string in the call that is wholly an address or a list of addresses counts too, whatever its field is called (`recipientEmail`, `attendees`). Each entry must be a bare address or `Name <address>`, and every address must be on the allow-list. `from`, `sender` and `reply_to` are not destinations.
+- URLs come from `url`, `params.url`, each `urls` entry, `input.url`, each `input.startUrls` URL and `request.url`, plus any other string in the call that is wholly a URL (`endpoint`). A SEND needs every URL host on the allow-list. A FETCH checks every URL for secrets and against the blocklist. A URL that holds a newline, a tab or another control character is blocked.
 - A SEND tool with no recipient field and no URL is blocked, because the hook cannot tell where it goes. Slack posts and Notion pages are in that group. If you trust a tool like that, take it out of the egress-guard matcher in `settings.json`.
 - A tool that names its destination only in a field not listed here is read as having no destination, so it is blocked. The hook cannot know every tool's schema, so it fails closed instead of guessing.
 

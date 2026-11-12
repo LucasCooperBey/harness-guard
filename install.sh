@@ -18,6 +18,8 @@ for f in "$SRC"/*.sh; do
   echo "  ✓ $name"
 done
 
+echo 'egress-guard: ~/.claude/allowlist-domains.txt starts empty, so every send is blocked until you add the domains you send to.'
+
 echo ""
 echo "Setting hook-integrity baseline…"
 "$DEST/verify-integrity.sh" generate || true

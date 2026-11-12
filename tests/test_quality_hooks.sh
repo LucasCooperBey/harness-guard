@@ -4,7 +4,14 @@ set -uo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 HOOKS="$here/../hooks"
 TMP="$(mktemp -d)"
-trap '/bin/rm -rf "$TMP"' EXIT
+LOCKED_DIR=""
+cleanup() {
+  if [ -n "${LOCKED_DIR}" ] && [ -d "${LOCKED_DIR}" ]; then
+    chmod 700 "$LOCKED_DIR" || true
+  fi
+  /bin/rm -rf "$TMP"
+}
+trap cleanup EXIT
 fail=0
 pass() { echo "PASS $1"; }
 bad() { echo "FAIL $1"; fail=1; }
@@ -35,5 +42,18 @@ case "$msg" in
   *"rm ~"*|*"rm \$HOME"*|*"rm -"*|*"readonly.json"*|*".claude/state"*) bad "the block message does not name how to switch the mode off: $msg" ;;
   *) pass "the block message does not name how to switch the mode off" ;;
 esac
+
+# source: 11-12 review of c69dc2f, the quality gate failed open when it could not enter the project folder
+# The hook sets PROJECT_ROOT from CLAUDE_PROJECT_DIR when that is set, else pwd.
+LOCKED_DIR="$(mktemp -d "$TMP/locked.XXXXXX")"
+printf '%s\n' '{"name":"quality-gate-fixture"}' > "$LOCKED_DIR/package.json"
+chmod 000 "$LOCKED_DIR"
+qg_out="$(printf '%s' '{"tool_input":{"command":"git commit -m x"}}' | CLAUDE_PROJECT_DIR="$LOCKED_DIR" bash "$HOOKS/pre-commit-quality-gate.sh" 2>&1)"
+qg_status=$?
+if [ "$qg_status" -eq 2 ] && printf '%s' "$qg_out" | grep -F -q -- "$LOCKED_DIR" && printf '%s' "$qg_out" | grep -F -q "blocked" && printf '%s' "$qg_out" | grep -F -q "could not run"; then
+  pass "the quality gate blocks when it cannot enter the project folder"
+else
+  bad "the quality gate blocks when it cannot enter the project folder (status $qg_status): ${qg_out:0:300}"
+fi
 
 if [ "$fail" -ne 0 ]; then exit 1; fi

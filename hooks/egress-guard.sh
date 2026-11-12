@@ -33,32 +33,69 @@ LOG="$HOME/.claude/artifacts/logs/egress-guard.log"
 mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
 
 # Credential / secret-shaped patterns. Conservative: real keys and paths, not normal prose.
-SECRET_RE='(~/?\.ssh|/\.ssh/|id_rsa|id_ed25519|BEGIN [A-Z ]*PRIVATE KEY|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|xox[baprs]-[0-9A-Za-z-]{10,}|gh[pousr]_[0-9A-Za-z]{20,}|sk-[A-Za-z0-9_-]{20,}|AIza[0-9A-Za-z_-]{20,}|secret[_-]?(key|token)|password["'"'"' :=]{1,3}[^ ]|aws_secret|1password|op://)'
+# Key shapes stay case-sensitive. sk- matches only when it does not continue a word: bash ERE
+# has no lookbehind, so the left side is the start of the text or a non-alphanumeric character.
+# Markers such as "password" are a second, case-insensitive pattern. That split keeps
+# risk-based-security-assessment-guide and the phrase "password reset" from reading as secrets,
+# while "password: hunter2hunter2" still matches.
+SECRET_RE_CS='AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|xox[baprs]-[0-9A-Za-z-]{10,}|gh[pousr]_[0-9A-Za-z]{20,}|AIza[0-9A-Za-z_-]{20,}|(^|[^A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}'
+SECRET_RE_CI='(~/?\.ssh|/\.ssh/|id_rsa|id_ed25519|BEGIN [A-Z ]*PRIVATE KEY|secret[_-]?(key|token)|aws_secret|1password|op://|password['"'"'"]?[[:space:]]*[:=][[:space:]]*['"'"'"]?[^[:space:]'"'"'"]{4,})'
+
+# Whole-value addresses. An address is the email shape, or Name <email> whose brackets hold
+# that same shape. A body such as "see <file>" is not one.
+ADDR_RE='^[^[:space:]@<>]+@[^[:space:]@<>]+$'
+ANGLE_CAP='<([^<>]+)>$'
+URL_RE='^[A-Za-z][A-Za-z0-9+.-]*://[^[:space:]]+$'
 
 INPUT="$(cat 2>/dev/null || true)"
+DEST_JSON=""
 
 # Match with bash's own regex, never `printf | grep -q`: under pipefail, grep -q exits at the
 # first match, printf dies of SIGPIPE on a payload past the 64 KB pipe buffer, and the pipeline
 # reads as false, so a secret near the start of a long URL or query would pass.
 # A match sets SECRET_HINT to its first four characters and its length, so a block can say what
 # matched without printing the secret into the agent's context or the log.
+# A regex compile error (rc 2) counts as a match. Returning that rc unchanged would read as
+# "no secret" and the call would pass.
 SECRET_HINT=""
 has_secret() {
   local rc
+  SECRET_HINT=""
+  shopt -u nocasematch
+  [[ "$1" =~ $SECRET_RE_CS ]]
+  rc=$?
+  if [[ "$rc" -eq 0 ]]; then
+    SECRET_HINT="${BASH_REMATCH[0]:0:4}... (${#BASH_REMATCH[0]} characters, not shown)"
+    return 0
+  fi
+  if [[ "$rc" -eq 2 ]]; then
+    SECRET_HINT="the secret pattern could not be evaluated"
+    return 0
+  fi
   shopt -s nocasematch
-  [[ "$1" =~ $SECRET_RE ]]
+  [[ "$1" =~ $SECRET_RE_CI ]]
   rc=$?
   shopt -u nocasematch
   if [[ "$rc" -eq 0 ]]; then
     SECRET_HINT="${BASH_REMATCH[0]:0:4}... (${#BASH_REMATCH[0]} characters, not shown)"
+    return 0
   fi
-  return "$rc"
+  if [[ "$rc" -eq 2 ]]; then
+    SECRET_HINT="the secret pattern could not be evaluated"
+    return 0
+  fi
+  return 1
 }
 
 ts() { date -Iseconds; }
 logline() { echo "$(ts) $*" >> "$LOG" 2>/dev/null || true; }
 
-notify() { osascript -e "display notification \"$1\" with title \"Egress guard\" subtitle \"$2\" sound name \"Basso\"" 2>/dev/null || true; }
+# Arguments, never the script source. A tool name that closes a string must not become code.
+notify() {
+  osascript -e 'on run argv' \
+    -e 'display notification (item 1 of argv) with title "Egress guard" subtitle (item 2 of argv) sound name "Basso"' \
+    -e 'end run' "$1" "$2" 2>/dev/null || true
+}
 
 TOOL_NAME="unknown"
 block() { # $1 = short reason (notify), $2 = detail for stderr/log
@@ -156,95 +193,244 @@ host_from_url() {
   DOMAIN="$host"
 }
 
-# One JSON object per present, non-empty recipient field, at any depth of tool_input. A key is a
-# recipient field when its name, in any case, is to, cc, bcc, recipient(s), email(s),
-# address(es), or to, cc or bcc joined to one of those or to list (toRecipients, cc_addresses).
-# Every string under that key is recipient text. from, sender and reply_to are not destinations.
-recipient_fields() {
-  jq -c '
-    def as_text:
-      if type == "string" then .
-      elif type == "array" or type == "object" then [.. | strings] | join("\n")
-      elif . == null then ""
-      else tostring
-      end;
+trim_space() {
+  local s="$1"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
+
+# Double-quoted display names are removed before splitting. A comma inside the quotes belongs
+# to the name, so "A, Person" <a@allowed.example> stays one address. Single quotes stay, so an
+# apostrophe in an address is not treated as a quote.
+strip_double_quotes() {
+  local s="$1" out="" i=0 c len
+  len=${#s}
+  while [ "$i" -lt "$len" ]; do
+    c="${s:$i:1}"
+    if [ "$c" = '"' ]; then
+      i=$((i + 1))
+      while [ "$i" -lt "$len" ]; do
+        c="${s:$i:1}"
+        i=$((i + 1))
+        if [ "$c" = '"' ]; then
+          break
+        fi
+      done
+    else
+      out="${out}${c}"
+      i=$((i + 1))
+    fi
+  done
+  printf '%s' "$out"
+}
+
+# $1 address, $2 field name. Exactly one @, then the same domain rules as before.
+accept_address() {
+  local addr="$1" key="$2" atless domain count
+  atless="${addr//@/}"
+  count=$(( ${#addr} - ${#atless} ))
+  if [[ "$count" -gt 1 ]]; then
+    block "recipient address has more than one @, failing closed" "Address: ${addr:0:160}"
+  fi
+  if [[ "$count" -ne 1 ]]; then
+    block "could not read a recipient, failing closed" "field ${key:-recipient} held no address"
+  fi
+  domain="${addr#*@}"
+  domain="$(printf '%s' "$domain" | tr '[:upper:]' '[:lower:]')"
+  domain="${domain%.}"
+  if [[ ! "$domain" =~ ^[a-z0-9.-]+$ ]]; then
+    block "recipient domain has characters outside the allowed set, failing closed" "Domain: $domain"
+  fi
+  if ! domain_allowed "$domain"; then
+    block "SEND to a domain not on the allow-list" "Domain: $domain  Dest: ${addr:0:160}"
+  fi
+  accepted="${accepted:+$accepted }$domain"
+  checked=$((checked + 1))
+}
+
+# Split a recipient string on comma, semicolon and newline. Empty entries are skipped.
+# anything <addr> yields addr. One token with no whitespace is the address. Anything else blocks.
+consume_recipient_text() {
+  local raw="$1" key="$2" stripped entries entry addr found=0
+  stripped="$(strip_double_quotes "$raw")"
+  entries="$(printf '%s' "$stripped" | tr $',;\n' '\n')"
+  while IFS= read -r entry || [[ -n "$entry" ]]; do
+    entry="$(trim_space "$entry")"
+    [[ -z "$entry" ]] && continue
+    if [[ "$entry" =~ $ANGLE_CAP ]]; then
+      addr="${BASH_REMATCH[1]}"
+      addr="$(trim_space "$addr")"
+    elif [[ "$entry" != *[[:space:]]* ]]; then
+      addr="$entry"
+    else
+      block "could not read a recipient, failing closed" "field ${key:-recipient} held an entry that is not one address"
+    fi
+    found=1
+    accept_address "$addr" "$key"
+  done < <(printf '%s\n' "$entries")
+  if [[ "$found" -eq 0 ]]; then
+    block "could not read a recipient, failing closed" "field ${key:-recipient} held no address"
+  fi
+}
+
+# True when every comma or semicolon entry is an address. A string that is entirely a URL is a
+# URL destination, not a recipient. The text inside <brackets> must itself be an address, so
+# prose such as "see <file>" is not a destination.
+whole_is_addresses() {
+  local raw="$1" trimmed entries entry n=0 inside
+  trimmed="$(trim_space "$raw")"
+  if [[ -z "$trimmed" || "$trimmed" =~ $URL_RE ]]; then
+    return 1
+  fi
+  entries="$(printf '%s' "$raw" | tr $',;' '\n')"
+  while IFS= read -r entry || [[ -n "$entry" ]]; do
+    entry="$(trim_space "$entry")"
+    [[ -z "$entry" ]] && continue
+    n=$((n + 1))
+    if [[ "$entry" =~ $ADDR_RE ]]; then
+      continue
+    fi
+    if [[ "$entry" =~ $ANGLE_CAP ]]; then
+      inside="${BASH_REMATCH[1]}"
+      inside="$(trim_space "$inside")"
+      if [[ "$inside" =~ $ADDR_RE ]]; then
+        continue
+      fi
+    fi
+    return 1
+  done < <(printf '%s\n' "$entries")
+  [[ "$n" -gt 0 ]]
+}
+
+# One JSON object for tool_input. ctrl is decided here, on the decoded string, before the shell
+# can split a URL on a newline. Recipient keys keep the previous name rule. Subtrees named from,
+# sender, reply_to or replyTo are ignored. Name, displayName, display_name and label leaves inside
+# a recipient value are ignored. Any other string that is entirely a URL is a destination too.
+collect_destinations() {
+  DEST_JSON="$(printf '%s' "$INPUT" | jq -c '
+    def skipkey: ascii_downcase | test("^(from|sender|reply_?to)$");
+    def rkey: ascii_downcase
+      | test("^(to|cc|bcc|recipients?|emails?|address(es)?|(to|cc|bcc)_?(recipients?|address(es)?|emails?|list))$");
+    def namekey: ascii_downcase | test("^(name|displayname|display_name|label)$");
     def is_nonempty:
       if . == null then false
       elif type == "string" then . != ""
       elif type == "array" or type == "object" then length > 0
       else true
       end;
-    def rkey: ascii_downcase
-      | test("^(to|cc|bcc|recipients?|emails?|address(es)?|(to|cc|bcc)_?(recipients?|address(es)?|emails?|list))$");
-    def skipkey: ascii_downcase | test("^(from|sender|reply_?to)$");
-    def fields:
+    def trimspace:
+      sub("^[[:space:]]+"; "") | sub("[[:space:]]+$"; "");
+    def looks_like_url:
+      if type != "string" then false
+      else trimspace | test("^[A-Za-z][A-Za-z0-9+.-]*://\\S+$")
+      end;
+    def has_ctrl:
+      if type != "string" then false
+      else any(explode[]?; . < 32 or . == 127)
+      end;
+    def recip_leaves:
+      if type == "string" then select(. != "")
+      elif type == "array" then .[] | recip_leaves
+      elif type == "object" then
+        to_entries[] | select(.key | namekey | not) | .value | recip_leaves
+      elif . == null then empty
+      else tostring
+      end;
+    def walk_recips:
       if type == "object" then
         to_entries[]
         | select(.key | skipkey | not)
-        | if (.key | rkey) then (select(.value | is_nonempty) | {k: .key, t: (.value | as_text)})
-          else (.value | fields) end
-      elif type == "array" then .[] | fields
+        | if ((.key | rkey) and (.value | is_nonempty)) then
+            {k: .key, t: (.value | recip_leaves)}
+          else .value | walk_recips
+          end
+      elif type == "array" then .[] | walk_recips
       else empty
       end;
-    (.tool_input // {}) | fields
-  '
-}
-
-# Every URL a tool call names, one per line: url, params.url, each urls entry, input.url, each
-# input.startUrls url, request.url. A value that is not a string is printed as JSON text, so it
-# reaches the host check and fails it.
-all_urls() {
-  jq -r '
+    def walk_strays:
+      if type == "object" then
+        to_entries[]
+        | select(.key | skipkey | not)
+        | if (.key | rkey) then empty
+          else .value | walk_strays
+          end
+      elif type == "array" then .[] | walk_strays
+      elif type == "string" then select(looks_like_url | not)
+      else empty
+      end;
+    def walk_urls:
+      if type == "object" then
+        to_entries[]
+        | select(.key | skipkey | not)
+        | .value | walk_urls
+      elif type == "array" then .[] | walk_urls
+      elif type == "string" then select(looks_like_url)
+      else empty
+      end;
     (.tool_input // {}) as $in
-    | [($in.url?), ($in.params.url?), ($in.urls[]?), ($in.input.url?),
-       ($in.input.startUrls[]?.url?), ($in.request.url?)]
-    | map(select(. != null and . != "") | if type == "string" then . else tostring end)[]
-  '
+    | [ $in | walk_recips ] as $recips
+    | [ $in | walk_strays ] as $strays
+    | [ $in | walk_urls ] as $whole
+    | [ ($in.url?), ($in.params.url?), ($in.urls[]?), ($in.input.url?),
+        ($in.input.startUrls[]?.url?), ($in.request.url?) ]
+      | map(select(. != null and . != "") | if type == "string" then . else tostring end) as $known
+    | [ $known[], ($whole[] | trimspace) ] | map(select(. != "")) | unique as $urls
+    | [ $known[], $whole[] ] as $raws
+    | {
+        ctrl: any($raws[]; has_ctrl),
+        urls: $urls,
+        recips: $recips,
+        strays: $strays
+      }
+  ' 2>/dev/null)" || return 1
 }
 
-# Addresses are runs without whitespace, comma, semicolon, quote, or angle bracket that contain @.
+# The flag was computed in jq. Do not print the URL itself: a newline in it would split the line.
+refuse_control_urls() {
+  local ctrl
+  ctrl="$(printf '%s' "$DEST_JSON" | jq -r '.ctrl' 2>/dev/null)" || block "could not read the tool call, failing closed" "jq could not read the URL fields"
+  if [[ "$ctrl" == "true" ]]; then
+    block "URL holds a control character, failing closed" "a URL contains a control character"
+  fi
+}
+
 # Every recipient address and every URL must be on the allow-list. A send with neither blocks.
 guard_send() {
-  local recs rec key text tokens tok found domain atless accepted="" urls u checked=0
-  urls="$(printf '%s' "$INPUT" | all_urls 2>/dev/null)" || block "could not read the tool call, failing closed" "jq could not read the URL fields"
+  local recs rec key text stray_lines stray_json stray urls u accepted="" checked=0
+  collect_destinations || block "could not read the tool call, failing closed" "jq could not read the tool call"
+  refuse_control_urls
+  urls="$(printf '%s' "$DEST_JSON" | jq -r '.urls[]' 2>/dev/null)" || block "could not read the tool call, failing closed" "jq could not read the URL fields"
   if [[ -n "$urls" ]] && has_secret "$urls"; then
     block "destination carries secret-shaped text (possible exfiltration)" "Matched: $SECRET_HINT"
   fi
-  recs="$(printf '%s' "$INPUT" | recipient_fields 2>/dev/null)" || block "could not read the tool call, failing closed" "jq could not parse recipients"
+  recs="$(printf '%s' "$DEST_JSON" | jq -c '.recips[]' 2>/dev/null)" || block "could not read the tool call, failing closed" "jq could not parse recipients"
   ensure_allowlist
-  while IFS= read -r rec || [[ -n "$rec" ]]; do
-    [[ -z "$rec" ]] && continue
-    key="$(printf '%s' "$rec" | jq -r '.k // empty')" || block "could not read a recipient, failing closed" "jq could not read a recipient field"
-    text="$(printf '%s' "$rec" | jq -r '.t // empty')" || block "could not read a recipient, failing closed" "jq could not read a recipient field"
-    if [[ -n "$text" ]] && has_secret "$text"; then
-      block "destination carries secret-shaped text (possible exfiltration)" "Matched: $SECRET_HINT"
-    fi
-    tokens="$(printf '%s' "$text" | tr '[:space:],;"'"'"'<>' '\n')"
-    found=0
-    while IFS= read -r tok || [[ -n "$tok" ]]; do
-      [[ -z "$tok" ]] && continue
-      [[ "$tok" == *@* ]] || continue
-      found=1
-      atless="${tok//@/}"
-      if [[ $(( ${#tok} - ${#atless} )) -gt 1 ]]; then
-        block "recipient address has more than one @, failing closed" "Address: ${tok:0:160}"
+  if [[ -n "$recs" ]]; then
+    while IFS= read -r rec || [[ -n "$rec" ]]; do
+      [[ -z "$rec" ]] && continue
+      key="$(printf '%s' "$rec" | jq -r '.k // empty')" || block "could not read a recipient, failing closed" "jq could not read a recipient field"
+      text="$(printf '%s' "$rec" | jq -r '.t // empty')" || block "could not read a recipient, failing closed" "jq could not read a recipient field"
+      [[ -z "$text" ]] && continue
+      if has_secret "$text"; then
+        block "destination carries secret-shaped text (possible exfiltration)" "Matched: $SECRET_HINT"
       fi
-      domain="${tok#*@}"
-      domain="$(printf '%s' "$domain" | tr '[:upper:]' '[:lower:]')"
-      domain="${domain%.}"
-      if [[ ! "$domain" =~ ^[a-z0-9.-]+$ ]]; then
-        block "recipient domain has characters outside the allowed set, failing closed" "Domain: $domain"
+      consume_recipient_text "$text" "$key"
+    done < <(printf '%s\n' "$recs")
+  fi
+  stray_lines="$(printf '%s' "$DEST_JSON" | jq -c '.strays[]' 2>/dev/null)" || block "could not read the tool call, failing closed" "jq could not read a string field"
+  if [[ -n "$stray_lines" ]]; then
+    while IFS= read -r stray_json || [[ -n "$stray_json" ]]; do
+      [[ -z "$stray_json" ]] && continue
+      stray="$(printf '%s' "$stray_json" | jq -r '.' 2>/dev/null)" || block "could not read the tool call, failing closed" "jq could not read a string field"
+      if whole_is_addresses "$stray"; then
+        if has_secret "$stray"; then
+          block "destination carries secret-shaped text (possible exfiltration)" "Matched: $SECRET_HINT"
+        fi
+        consume_recipient_text "$stray" "value"
       fi
-      if ! domain_allowed "$domain"; then
-        block "SEND to a domain not on the allow-list" "Domain: $domain  Dest: ${tok:0:160}"
-      fi
-      accepted="${accepted:+$accepted }$domain"
-      checked=$((checked + 1))
-    done < <(printf '%s\n' "$tokens")
-    if [[ "$found" -eq 0 ]]; then
-      block "could not read a recipient, failing closed" "field ${key:-recipient} held no address"
-    fi
-  done < <(printf '%s\n' "$recs")
+    done < <(printf '%s\n' "$stray_lines")
+  fi
   # A send that names recipients and URLs reaches all of them, so every URL host is checked too.
   while IFS= read -r u || [[ -n "$u" ]]; do
     [[ -z "$u" ]] && continue
@@ -311,7 +497,10 @@ if [[ "$CLASS" == "send" ]]; then
 fi
 
 # ---- FETCH: secret scan of every URL, then each host against the optional blocklist ----
-URLS="$(printf '%s' "$INPUT" | all_urls 2>/dev/null)" || block "could not read the tool call, failing closed" "jq could not read the URL fields"
+# Known URL fields plus any string that is entirely a URL. Control characters block first.
+collect_destinations || block "could not read the tool call, failing closed" "jq could not read the URL fields"
+refuse_control_urls
+URLS="$(printf '%s' "$DEST_JSON" | jq -r '.urls[]' 2>/dev/null)" || block "could not read the tool call, failing closed" "jq could not read the URL fields"
 if [[ -z "$URLS" ]]; then
   block "could not read URL of a FETCH tool, failing closed" "tool_input had no url field"
 fi

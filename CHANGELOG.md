@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-11-12, second release
+
+- `egress-guard.sh` treats any string in a SEND call that is wholly an email address, a list of addresses or a URL as a destination, at any depth and under any field name, so fields such as `recipientEmail`, `attendees` and `endpoint` are checked. A body that mentions an address is still not a destination.
+- Each entry in a recipient field must be a bare address or `Name <address>`. An entry with no address, as in `a@allowed.example, attacker`, blocks the send. A quoted display name that holds a comma, such as `"A, Person" <a@allowed.example>`, stays one address.
+- A URL that holds a control character, such as a newline or a tab, blocks the call.
+- The secret scan has a case-sensitive part for key shapes (`AKIA`, `ghp_`, and `sk-` after a character that is not a letter or digit) and a case-insensitive part for words. `password` matches only when `:` or `=` follows it, so a search about a password reset is allowed. A pattern that cannot be evaluated counts as a match.
+- The desktop alert passes the tool name to `osascript` as an argument instead of pasting it into AppleScript source, so a tool name cannot break out of the string.
+- `pre-commit-quality-gate.sh` blocks the commit with exit 2 when it cannot enter the project folder. The first release let the commit through with a warning.
+- `install.sh` says that the allow-list starts empty, so every send is blocked until you add the domains you send to.
+
 ## 2026-11-12
 
 - `egress-guard.sh` blocks with exit 2. Earlier copies exited 1, which Claude Code treats as a non-blocking error, so the tool call still ran.

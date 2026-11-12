@@ -15,15 +15,20 @@ case "$COMMAND" in
     ;;
 esac
 
-# Find project root from CWD or CLAUDE_PROJECT_DIR
+# Find project root from CWD or CLAUDE_PROJECT_DIR.
+# Enter before the package.json check. On a mode 000 folder, -f cannot see
+# package.json, and exiting 0 there would let the commit through with no checks.
 PROJECT_ROOT="${CLAUDE_PROJECT_DIR:-$(pwd)}"
-if [ ! -f "$PROJECT_ROOT/package.json" ]; then
+if [ -d "$PROJECT_ROOT" ]; then
+  if ! cd "$PROJECT_ROOT"; then
+    echo "pre-commit-quality-gate: could not enter $PROJECT_ROOT, so the commit is blocked because the checks could not run." >&2
+    exit 2
+  fi
+  if [ ! -f package.json ]; then
+    exit 0  # No package.json, skip checks
+  fi
+elif [ ! -f "$PROJECT_ROOT/package.json" ]; then
   exit 0  # No package.json, skip checks
-fi
-
-if ! cd "$PROJECT_ROOT"; then
-  echo "pre-commit-quality-gate: could not enter $PROJECT_ROOT, so tests, lint and typecheck did not run." >&2
-  exit 0
 fi
 
 ERRORS=""
