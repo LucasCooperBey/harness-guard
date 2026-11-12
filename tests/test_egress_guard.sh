@@ -324,6 +324,22 @@ CHECK_OUT='could not read a recipient, failing closed' check 2 "a to of Some Per
 quoted_ok="$(payload mcp__claude_ai_Gmail__send_email '{"to": "\"A, Person\" <a@allowed.example>", "subject": "x"}')"
 check 0 "a quoted display name with a comma is allowed" "$quoted_ok" bash
 
+# source: 11-12 security review of 7afb44f, an address inside a quoted display name was never checked
+quoted_evil="$(payload mcp__claude_ai_Gmail__send_email '{"to": "\"x@evil.example\" <a@allowed.example>", "subject": "x"}')"
+CHECK_OUT='Domain: evil.example' check 2 "an off-list address inside a quoted display name is blocked" "$quoted_evil" bash
+# source: 11-12 security review of 7afb44f, only the last pair of brackets was read
+two_brackets="$(payload mcp__claude_ai_Gmail__send_email '{"to": "<x@evil.example> <a@allowed.example>", "subject": "x"}')"
+check 2 "two bracketed addresses in one entry are blocked" "$two_brackets" bash
+# source: 11-12 security review of 7afb44f, an address before the brackets was read as a display name
+bare_before="$(payload mcp__claude_ai_Gmail__send_email '{"to": "x@evil.example <a@allowed.example>", "subject": "x"}')"
+CHECK_OUT='Domain: evil.example' check 2 "an off-list address before the brackets is blocked" "$bare_before" bash
+# source: 11-12 security review of 7afb44f, an unbalanced quote hid the rest of the value from the parse
+unbalanced="$(payload mcp__claude_ai_Gmail__send_email '{"to": "\"a@allowed.example <a@allowed.example>", "subject": "x"}')"
+CHECK_OUT='unbalanced double quote' check 2 "an unbalanced double quote in a recipient is blocked" "$unbalanced" bash
+# source: 11-12 security review of 7afb44f, the same rule under a field name the hook does not list
+stray_quoted="$(payload mcp__claude_ai_Gmail__send_email '{"to": "a@allowed.example", "recipientEmail": "\"x@evil.example\" <a@allowed.example>", "subject": "x"}')"
+CHECK_OUT='Domain: evil.example' check 2 "an off-list quoted address under an unlisted field is blocked" "$stray_quoted" bash
+
 # source: 11-12 review of c69dc2f, prose that only mentions an address was not a destination and must stay allowed
 prose="$(payload mcp__claude_ai_Gmail__send_email '{"to": "a@allowed.example", "body": "write to x@evil.example or @channel", "subject": "x"}')"
 check 0 "a body that mentions an address is not a destination" "$prose" bash

@@ -252,7 +252,20 @@ accept_address() {
 # Split a recipient string on comma, semicolon and newline. Empty entries are skipped.
 # anything <addr> yields addr. One token with no whitespace is the address. Anything else blocks.
 consume_recipient_text() {
-  local raw="$1" key="$2" stripped entries entry addr found=0
+  local raw="$1" key="$2" stripped entries entry addr found=0 quotes tokens token
+  # Every address-shaped token in the raw value must pass, wherever it sits: inside quotes, before
+  # the brackets or in a second pair of brackets. A mail tool may read any of them as the address,
+  # so the structured parse below is a second check, never the only one.
+  # source: 11-12 security review of 7afb44f, "x@evil.example" <a@allowed.example> passed
+  quotes="${raw//[^\"]/}"
+  if (( ${#quotes} % 2 )); then
+    block "could not read a recipient, failing closed" "field ${key:-recipient} has an unbalanced double quote"
+  fi
+  tokens="$(printf '%s\n' "$raw" | grep -oE '[^][[:space:],;<>"()]*@[^][[:space:],;<>"()]*' || true)"
+  while IFS= read -r token || [[ -n "$token" ]]; do
+    [[ -z "$token" ]] && continue
+    accept_address "$token" "$key"
+  done < <(printf '%s\n' "$tokens")
   stripped="$(strip_double_quotes "$raw")"
   entries="$(printf '%s' "$stripped" | tr $',;\n' '\n')"
   while IFS= read -r entry || [[ -n "$entry" ]]; do
@@ -261,6 +274,10 @@ consume_recipient_text() {
     if [[ "$entry" =~ $ANGLE_CAP ]]; then
       addr="${BASH_REMATCH[1]}"
       addr="$(trim_space "$addr")"
+      # The display name before the brackets holds no bracket of its own: one address per entry.
+      if [[ "${entry%<*}" == *[\<\>]* ]]; then
+        block "could not read a recipient, failing closed" "field ${key:-recipient} held an entry that is not one address"
+      fi
     elif [[ "$entry" != *[[:space:]]* ]]; then
       addr="$entry"
     else

@@ -3,7 +3,8 @@
 ## 2026-11-12, second release
 
 - `egress-guard.sh` treats any string in a SEND call that is wholly an email address, a list of addresses or a URL as a destination, at any depth and under any field name, so fields such as `recipientEmail`, `attendees` and `endpoint` are checked. A body that mentions an address is still not a destination.
-- Each entry in a recipient field must be a bare address or `Name <address>`. An entry with no address, as in `a@allowed.example, attacker`, blocks the send. A quoted display name that holds a comma, such as `"A, Person" <a@allowed.example>`, stays one address.
+- Each entry in a recipient field must be a bare address or `Name <address>`. An entry with no address, as in `a@allowed.example, attacker`, blocks the send, and so does an entry with a second pair of brackets or a value with an unbalanced double quote. A quoted display name that holds a comma, such as `"A, Person" <a@allowed.example>`, stays one address.
+- Every address-shaped token in a recipient value must be on the allow-list, wherever it sits: inside a quoted display name, before the brackets or in the brackets. A mail tool may read any of them as the address. A build of this release published earlier the same day read only the bracketed address, so `"x@evil.example" <a@allowed.example>` passed; it was replaced within the hour.
 - A URL that holds a control character, such as a newline or a tab, blocks the call.
 - The secret scan has a case-sensitive part for key shapes (`AKIA`, `ghp_`, and `sk-` after a character that is not a letter or digit) and a case-insensitive part for words. `password` matches only when `:` or `=` follows it, so a search about a password reset is allowed. A pattern that cannot be evaluated counts as a match.
 - The desktop alert passes the tool name to `osascript` as an argument instead of pasting it into AppleScript source, so a tool name cannot break out of the string.
