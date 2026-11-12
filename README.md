@@ -47,7 +47,7 @@ Then merge the `hooks` block from [`settings.example.json`](./settings.example.j
 
 ## Example
 
-With the hooks installed and an allow-list that does not hold `not-on-your-list.example`, an agent's Gmail send to that domain stops before it runs. This is what the hook printed in a test on 2026-11-12 (the allow-list path is shortened):
+With the hooks installed and an allow-list that does not hold `not-on-your-list.example`, an agent's Gmail send to that domain stops before it runs. This is what the hook printed from a fresh clone on 2026-11-12 (the allow-list path is shortened). The block message lists both kinds of fix, whichever rule fired:
 
 ```text
 BLOCKED by egress-guard: SEND to a domain not on the allow-list
@@ -57,6 +57,8 @@ Domain: not-on-your-list.example  Dest: someone@not-on-your-list.example
 
 If this is legitimate:
   - SEND target: add the domain to ~/.claude/allowlist-domains.txt
+  - FETCH/SEARCH flagged a secret-shaped string: re-issue without the credential in the URL/query,
+    or route the fetch through an isolated quarantine sub-agent instead.
 ```
 
 The hook exits 2, so Claude Code does not run the send and shows the agent this message. Add `example.com` to the allow-list and a send to `someone@example.com` goes through, with a line in `~/.claude/artifacts/logs/egress-guard.log`.
