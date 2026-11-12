@@ -21,4 +21,4 @@
 - `no-console-log.sh` hands the file path and the matched lines to Python as environment values. They used to be pasted into the Python source, so a line such as `console.log('''); import os; ...` could run code inside the hook.
 - `AGENTS.md` lists the real test and lint commands.
 - `block-destructive.sh` drops two pipe-to-shell patterns that an earlier pattern on the same line already covered, so they could never match. Its behavior is unchanged.
-- `README.md` says that only exit 2 blocks a call and lists what `egress-guard.sh` reads. The destructive-command scanner update follows in a later release.
+- `README.md` says that only exit 2 blocks a call, lists what `egress-guard.sh` reads, and shows a blocked send in an Example section. The destructive-command scanner update follows in a later release.

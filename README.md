@@ -45,6 +45,22 @@ Then merge the `hooks` block from [`settings.example.json`](./settings.example.j
 - A SEND tool with no recipient field and no URL is blocked, because the hook cannot tell where it goes. Slack posts and Notion pages are in that group. If you trust a tool like that, take it out of the egress-guard matcher in `settings.json`.
 - A tool that names its destination only in a field not listed here is read as having no destination, so it is blocked. The hook cannot know every tool's schema, so it fails closed instead of guessing.
 
+## Example
+
+With the hooks installed and an allow-list that does not hold `not-on-your-list.example`, an agent's Gmail send to that domain stops before it runs. This is what the hook printed in a test on 2026-11-12 (the allow-list path is shortened):
+
+```text
+BLOCKED by egress-guard: SEND to a domain not on the allow-list
+
+Tool: mcp__claude_ai_Gmail__send_email
+Domain: not-on-your-list.example  Dest: someone@not-on-your-list.example
+
+If this is legitimate:
+  - SEND target: add the domain to ~/.claude/allowlist-domains.txt
+```
+
+The hook exits 2, so Claude Code does not run the send and shows the agent this message. Add `example.com` to the allow-list and a send to `someone@example.com` goes through, with a line in `~/.claude/artifacts/logs/egress-guard.log`.
+
 ## Updating from an earlier copy
 
 Earlier copies of `egress-guard.sh` exited 1 and only warned, so Claude Code still ran the call. Re-run `install.sh` or copy the hook again.
