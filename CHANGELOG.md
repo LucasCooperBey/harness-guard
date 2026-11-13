@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-11-12, fourth release
+
+- A reply is no longer blocked by its message ids or attachment names. `inReplyTo`, `references`, `messageId`, `threadId`, `attachments`, `filename` and `path` are not read as destinations. The second and third releases read `<id@mail.gmail.com>` and `img@2x.png` as off-list addresses and blocked the send.
+- The control-character rule skips the prose fields, so a body that opens with a link and a new line is allowed. `prompt` and `query` count as prose.
+- An allowed address that appears only in a field the hook does not list does not count as a recipient, so a SEND with no recipient field and no URL is still blocked.
+- Block messages show `***` for user info in a URL or in an address-shaped token, and the redaction runs before the message is cut to length.
+- The address scan reads every string with one `jq` call and one `grep`, instead of one pair per string.
+
 ## 2026-11-12, third release
 
 - `egress-guard.sh` checks every address-shaped token in a SEND at any field and depth, including `name`, `displayName`, `display_name` and `label` inside a recipient, and a field the hook does not list as a recipient field (`contact`, `headers.Bcc`). Strings under `from`, `sender`, `reply_to` and `replyTo`, and the prose fields `subject`, `body`, `text`, `content`, `message`, `html` and `description`, are not destinations.

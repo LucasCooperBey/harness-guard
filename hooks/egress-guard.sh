@@ -160,15 +160,29 @@ list_in_use() {
 domain_allowed() { list_match "$1" "$ALLOWLIST"; }
 
 # A URL for a block message: the user info before the last @ in the authority becomes ***, so a
-# password written into a URL before its host never reaches stderr or the egress log.
+# password written into a URL before its host never reaches stderr or the egress log. The scheme
+# is optional, and the redaction runs on the whole value before it is cut to 200 characters.
 # source: 11-12 review, the user-info block printed the whole URL, password included
+# source: 11-12 review of a121d06, a cut before the redaction could leave the start of a long password
 redact_userinfo() {
-  local u="$1" re='^([A-Za-z][A-Za-z0-9+.-]*://)[^/?#]*@(.*)$'
+  local u="$1" re='^([A-Za-z][A-Za-z0-9+.-]*://)?[^/?#]*@(.*)$' out
   if [[ "$u" =~ $re ]]; then
-    printf '%s***@%s' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+    out="${BASH_REMATCH[1]}***@${BASH_REMATCH[2]}"
   else
-    printf '%s' "$u"
+    out="$u"
   fi
+  printf '%s' "${out:0:200}"
+}
+
+# An address token for a block message. A token whose part before the last @ holds : or / is
+# URL-shaped, so only ***@ and what follows the @ is shown.
+# source: 11-12 security review of a121d06, an address-shaped token could carry a URL password
+shown_addr() {
+  local a="$1" before="${1%@*}"
+  case "$before" in
+    *[:/]*) a="***@${a##*@}" ;;
+  esac
+  printf '%s' "${a:0:160}"
 }
 
 # Host from a URL. Caller secret-scans the raw destination first.
@@ -179,7 +193,7 @@ redact_userinfo() {
 host_from_url() {
   local url="$1" class="$2" rest auth host
   if [[ "$class" == "send" && "$url" == *\\* ]]; then
-    block "URL contains a backslash, failing closed" "Dest: $(redact_userinfo "${url:0:200}")"
+    block "URL contains a backslash, failing closed" "Dest: $(redact_userinfo "$url")"
   fi
   rest="$url"
   if [[ "$url" =~ ^[A-Za-z][A-Za-z0-9+.-]*:// ]]; then
@@ -187,7 +201,7 @@ host_from_url() {
   fi
   auth="${rest%%[/?#\\]*}"
   if [[ "$class" == "send" && "$auth" == *@* ]]; then
-    block "URL carries user info, failing closed" "Dest: $(redact_userinfo "${url:0:200}")"
+    block "URL carries user info, failing closed" "Dest: $(redact_userinfo "$url")"
   fi
   if [[ "$class" == "fetch" ]]; then
     host="${auth##*@}"
@@ -268,7 +282,7 @@ accept_address() {
   atless="${addr//@/}"
   count=$(( ${#addr} - ${#atless} ))
   if [[ "$count" -gt 1 ]]; then
-    block "recipient address has more than one @, failing closed" "Address: ${addr:0:160}"
+    block "recipient address has more than one @, failing closed" "Address: $(shown_addr "$addr")"
   fi
   if [[ "$count" -ne 1 ]]; then
     block "could not read a recipient, failing closed" "field ${key:-recipient} held no address"
@@ -280,7 +294,7 @@ accept_address() {
     block "recipient domain has characters outside the allowed set, failing closed" "Domain: $domain"
   fi
   if ! domain_allowed "$domain"; then
-    block "SEND to a domain not on the allow-list" "Domain: $domain  Dest: ${addr:0:160}"
+    block "SEND to a domain not on the allow-list" "Domain: $domain  Dest: $(shown_addr "$addr")"
   fi
   accepted="${accepted:+$accepted }$domain"
   checked=$((checked + 1))
@@ -386,21 +400,18 @@ collect_destinations() {
     def rkey: ascii_downcase
       | test("^(to|cc|bcc|recipients?|emails?|address(es)?|(to|cc|bcc)_?(recipients?|address(es)?|emails?|list))$");
     def namekey: ascii_downcase | test("^(name|displayname|display_name|label)$");
-    def prosekey: ascii_downcase | test("^(subject|body|text|content|message|html|description)$");
+    def prosekey: ascii_downcase | test("^(subject|body|text|content|message|html|description|prompt|query)$");
+    # Message ids, thread ids and attachment names can hold an @ and are never destinations.
+    # source: 11-12 review of a121d06, an inReplyTo Message-ID and img@2x.png blocked a reply
+    def idkey: ascii_downcase | test("^(in_?reply_?to|references|message_?id|thread_?id|attachments?|file_?name|file_?path|path)$");
     def scheme_start:
       if type != "string" then false
       else test("^[A-Za-z][A-Za-z0-9+.-]*://")
       end;
-    def walk_strings:
-      if type == "object" then to_entries[] | .value | walk_strings
-      elif type == "array" then .[] | walk_strings
-      elif type == "string" then .
-      else empty
-      end;
     def walk_addr($prose):
       if type == "object" then
         to_entries[]
-        | select(.key | skipkey | not)
+        | select(.key | (skipkey or idkey) | not)
         | (.key | prosekey) as $p
         | .value | walk_addr($p)
       elif type == "array" then
@@ -450,7 +461,7 @@ collect_destinations() {
     def walk_strays:
       if type == "object" then
         to_entries[]
-        | select(.key | skipkey | not)
+        | select(.key | (skipkey or idkey) | not)
         | if (.key | rkey) then empty
           else .value | walk_strays
           end
@@ -478,7 +489,7 @@ collect_destinations() {
     | [ $known[], $whole[] ] as $raws
     | [ $in | walk_addr(false) ] as $addrs
     | {
-        ctrl: (any($raws[]; has_ctrl) or any($in | walk_strings; scheme_start and has_ctrl)),
+        ctrl: (any($raws[]; has_ctrl) or any($in | walk_addr(false); scheme_start and has_ctrl)),
         urls: $urls,
         recips: $recips,
         strays: $strays,
@@ -498,7 +509,7 @@ refuse_control_urls() {
 
 # Every recipient address and every URL must be on the allow-list. A send with neither blocks.
 guard_send() {
-  local recs rec key text stray_lines stray_json stray urls u addr_lines addr_json addr_text accepted="" checked=0
+  local recs rec key text stray_lines stray_json stray urls u addr_text checked_before accepted="" checked=0
   collect_destinations || block "could not read the tool call, failing closed" "jq could not read the tool call"
   refuse_control_urls
   urls="$(printf '%s' "$DEST_JSON" | jq -r '.urls[]' 2>/dev/null)" || block "could not read the tool call, failing closed" "jq could not read the URL fields"
@@ -537,7 +548,7 @@ guard_send() {
     [[ -z "$u" ]] && continue
     host_from_url "$u" send
     if ! domain_allowed "$DOMAIN"; then
-      block "SEND to a domain not on the allow-list" "Domain: $DOMAIN  Dest: ${u:0:160}"
+      block "SEND to a domain not on the allow-list" "Domain: $DOMAIN  Dest: $(redact_userinfo "$u")"
     fi
     accepted="${accepted:+$accepted }$DOMAIN"
     checked=$((checked + 1))
@@ -545,14 +556,15 @@ guard_send() {
   # Third check, after the URL host rules so a userinfo URL still reports that block.
   # Every string leaf except the prose fields and the from/sender/reply_to/replyTo subtrees.
   # source: 11-12 review of 6e5d69b, an address in name or in an unlisted field was not a destination
-  addr_lines="$(printf '%s' "$DEST_JSON" | jq -c '.addrs[]' 2>/dev/null)" || block "could not read the tool call, failing closed" "jq could not read a string field"
-  if [[ -n "$addr_lines" ]]; then
-    while IFS= read -r addr_json || [[ -n "$addr_json" ]]; do
-      [[ -z "$addr_json" ]] && continue
-      addr_text="$(printf '%s' "$addr_json" | jq -r '.' 2>/dev/null)" || block "could not read the tool call, failing closed" "jq could not read a string field"
-      [[ -z "$addr_text" ]] && continue
-      accept_tokens_in "$addr_text" "value"
-    done < <(printf '%s\n' "$addr_lines")
+  # One jq call and one scan for all leaves: a token holds no whitespace, so joining the leaves
+  # with newlines cannot make a token across two of them. It only refuses; an allowed address
+  # found here does not count as a recipient, so a SEND still needs a recipient field or a URL.
+  # source: 11-12 review of a121d06, an allowed address in a stray field passed the no-recipient check
+  addr_text="$(printf '%s' "$DEST_JSON" | jq -r '.addrs | join("\n")' 2>/dev/null)" || block "could not read the tool call, failing closed" "jq could not read a string field"
+  if [[ -n "$addr_text" ]]; then
+    checked_before="$checked"
+    accept_tokens_in "$addr_text" "value"
+    checked="$checked_before"
   fi
   if [[ "$checked" -eq 0 ]]; then
     block "could not read recipient of a SEND tool, failing closed" "tool_input had no recipient or URL field"

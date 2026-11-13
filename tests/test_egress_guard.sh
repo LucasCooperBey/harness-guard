@@ -208,16 +208,52 @@ CHECK_OUT='URL carries user info, failing closed' check 2 "webhook URL https://a
 pw_url="https://bob"; pw_url="$pw_url:Hunter2Pass"; pw_url="$pw_url@allowed.example/hook"
 webhook_pw="$(payload mcp__example__webhook "{\"url\": \"$pw_url\"}")"
 CHECK_OUT='https://***@allowed.example/hook' check 2 "a webhook URL with a password shows the user info as ***" "$webhook_pw" bash
-pw_seen=0
+# The log folder exists first, so the log check below reads a real BLOCK line.
+pw_log="$TMP/fakehome/.claude/artifacts/logs/egress-guard.log"
+mkdir -p "$(dirname "$pw_log")"
 pw_out="$(printf '%s' "$webhook_pw" | HOME="$TMP/fakehome" PATH="$TMP/bin:$PATH" bash "$HOOK" 2>&1)" || true
-if printf '%s' "$pw_out" | grep -F -q 'Hunter2Pass'; then pw_seen=1; fi
-if [ -f "$TMP/fakehome/.claude/artifacts/logs/egress-guard.log" ] && grep -F -q 'Hunter2Pass' "$TMP/fakehome/.claude/artifacts/logs/egress-guard.log"; then pw_seen=1; fi
-if [ "$pw_seen" -eq 0 ]; then
+if ! printf '%s' "$pw_out" | grep -F -q 'Hunter2Pass' && grep -F -q 'BLOCK ' "$pw_log" && ! grep -F -q 'Hunter2Pass' "$pw_log"; then
   echo "PASS the password in a blocked URL is in neither the output nor the egress log"
 else
   echo "FAIL the password in a blocked URL is in neither the output nor the egress log"
   fails=$((fails + 1))
 fi
+
+# source: 11-12 review of a121d06, the redaction ran after the cut to 200 characters
+long_pw="$(head -c 260 /dev/zero | tr '\0' 'P')"
+long_url="https://bob"; long_url="$long_url:$long_pw"; long_url="$long_url@allowed.example/hook"
+webhook_long="$(payload mcp__example__webhook "{\"url\": \"$long_url\"}")"
+long_out="$(printf '%s' "$webhook_long" | HOME="$TMP/fakehome" PATH="$TMP/bin:$PATH" bash "$HOOK" 2>&1)" || true
+if printf '%s' "$long_out" | grep -F -q 'PPPPPPPP'; then
+  echo "FAIL a 260-character password in a blocked URL is not shown even in part"
+  fails=$((fails + 1))
+else
+  echo "PASS a 260-character password in a blocked URL is not shown even in part"
+fi
+
+# source: 11-12 security review of a121d06, an address-shaped token could carry a URL password
+tok_url="https://bob"; tok_url="$tok_url:Hunter2Pass"; tok_url="$tok_url@evil.example"
+send_tok="$(payload mcp__claude_ai_Gmail__send_email "{\"to\": \"a@allowed.example\", \"note\": \"see $tok_url\"}")"
+CHECK_OUT='***@evil.example' check 2 "a URL password in an unlisted field is blocked and shown as ***" "$send_tok" bash
+tok_out="$(printf '%s' "$send_tok" | HOME="$TMP/fakehome" PATH="$TMP/bin:$PATH" bash "$HOOK" 2>&1)" || true
+if printf '%s' "$tok_out" | grep -F -q 'Hunter2Pass'; then
+  echo "FAIL the password in an address-shaped token is not shown"
+  fails=$((fails + 1))
+else
+  echo "PASS the password in an address-shaped token is not shown"
+fi
+
+# source: 11-12 review of a121d06, an inReplyTo Message-ID and img@2x.png blocked a reply
+send_reply="$(payload mcp__claude_ai_Gmail__send_email '{"to": "a@allowed.example", "subject": "Re: x", "body": "thanks", "threadId": "18c2f", "inReplyTo": "<CAF1x@mail.gmail.com>", "references": "<a1@mail.gmail.com> <b2@mail.gmail.com>", "attachments": [{"filename": "img@2x.png", "path": "/tmp/img@2x.png"}]}')"
+check 0 "a reply with Message-IDs and an img@2x.png attachment is allowed" "$send_reply" bash
+
+# source: 11-12 review of a121d06, a body that starts with a link and a new line was refused
+send_link_body="$(jq -cn '{tool_name: "mcp__claude_ai_Gmail__send_email", tool_input: {to: "a@allowed.example", subject: "PR", body: "https://github.com/x/y/pull/1\n\nPlease review."}}')"
+check 0 "a body that starts with a link and a new line is allowed" "$send_link_body" bash
+
+# source: 11-12 review of a121d06, an allowed address in a stray field passed the no-recipient check
+send_stray_only="$(payload mcp__example__webhook '{"channel": "C1", "text": "hi", "note": "ping a@allowed.example soon"}')"
+CHECK_OUT='tool_input had no recipient or URL field' check 2 "an allowed address only in a stray field is not a recipient" "$send_stray_only" bash
 
 # source: 11-12 review: a webhook whose host is on the allow-list is a SEND and is allowed
 webhook_ok="$(payload mcp__example__webhook '{"url": "https://allowed.example/hook"}')"
