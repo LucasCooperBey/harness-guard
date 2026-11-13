@@ -229,7 +229,7 @@ host_from_url() {
   host="${host%.}"
   if [[ "$class" == "send" ]]; then
     if [[ ! "$host" =~ ^[a-z0-9.-]+$ ]]; then
-      block "URL host has characters outside the allowed set, failing closed" "Host: $(shown_host "$host")  Dest: $(redact_userinfo "$url")"
+      block "URL host has characters outside the allowed set, failing closed" "Host: $(shown_host "$host")"
     fi
   fi
   DOMAIN="$host"

@@ -5,7 +5,7 @@
 - An object under an id or attachment field is read again, so an off-list address in `attachments[].meta` blocks. Only the strings there are skipped, and a string shaped `user@host:path` counts as `user@host`, so a path of `deploy@evil.example:/srv` blocks.
 - `prompt` and `query` are destinations again on a SEND tool. The fourth release counted them as prose, which let an off-list address through in a webhook's `prompt`.
 - The control-character rule reads every string except the prose fields again, `from`, `sender` and the id fields included. The fourth release had narrowed it to the fields the address scan reads.
-- Block messages show an address as `***@` and its domain, and a host or domain holding a `:` only up to the colon. The fourth release still showed part of a password written with `;` or `/` in it, and a URL whose password held a `/` printed the password as part of the host.
+- Block messages show an address as `***@` and its domain, and a host or domain holding a `:` only up to the colon. The fourth release still showed part of a password written with `;` or `/` in it, and a URL whose password held a `/` printed the password as part of the host. The host-character block prints only the host, so a query string never reaches it.
 - An allowed address found only in an unlisted field no longer reaches the ALLOW log line as a recipient domain.
 
 ## 2026-11-12, fourth release
