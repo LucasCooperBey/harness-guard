@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-11-12, third release
+
+- `egress-guard.sh` checks every address-shaped token in a SEND at any field and depth, including `name`, `displayName`, `display_name` and `label` inside a recipient, and a field the hook does not list as a recipient field (`contact`, `headers.Bcc`). Strings under `from`, `sender`, `reply_to` and `replyTo`, and the prose fields `subject`, `body`, `text`, `content`, `message`, `html` and `description`, are not destinations.
+- A string that starts with a scheme and `://` and holds a control character blocks a SEND or a FETCH, including under a field that is not a URL field, where a tab or a newline meant it was not read as a URL.
+- A double quote preceded by a backslash does not count as a quote delimiter, so `"Bob \" Smith" <a@allowed.example>` is one address and is allowed.
+- The hook blocks when the address scan cannot run. A grep error used to look like a value with no address in it.
+- A blocked URL is shown with its user info replaced by `***`, so a password written into a URL before its host never reaches the block message or the egress log.
+- `install.sh` says the allow-list starts empty only when `~/.claude/allowlist-domains.txt` is missing or has no domain line. Otherwise it says how many domains the allow-list keeps.
+- The quality gate's cannot-enter test is skipped when the tests run as root, where `chmod 000` does not stop `cd`.
+
 ## 2026-11-12, second release
 
 - `egress-guard.sh` treats any string in a SEND call that is wholly an email address, a list of addresses or a URL as a destination, at any depth and under any field name, so fields such as `recipientEmail`, `attendees` and `endpoint` are checked. A body that mentions an address is still not a destination.

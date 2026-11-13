@@ -203,6 +203,22 @@ check 2 "an address with two @ is blocked" "$two_at" bash
 webhook_user="$(payload mcp__example__webhook '{"url": "https://allowed.example:x@evil.example/hook"}')"
 CHECK_OUT='URL carries user info, failing closed' check 2 "webhook URL https://allowed.example:x@evil.example/hook is blocked" "$webhook_user" bash
 
+# source: 11-12 review, the user-info block printed the whole URL, so a password reached stderr and the log
+# The URL is built from parts so secret scanners do not read this file as holding a credential.
+pw_url="https://bob"; pw_url="$pw_url:Hunter2Pass"; pw_url="$pw_url@allowed.example/hook"
+webhook_pw="$(payload mcp__example__webhook "{\"url\": \"$pw_url\"}")"
+CHECK_OUT='https://***@allowed.example/hook' check 2 "a webhook URL with a password shows the user info as ***" "$webhook_pw" bash
+pw_seen=0
+pw_out="$(printf '%s' "$webhook_pw" | HOME="$TMP/fakehome" PATH="$TMP/bin:$PATH" bash "$HOOK" 2>&1)" || true
+if printf '%s' "$pw_out" | grep -F -q 'Hunter2Pass'; then pw_seen=1; fi
+if [ -f "$TMP/fakehome/.claude/artifacts/logs/egress-guard.log" ] && grep -F -q 'Hunter2Pass' "$TMP/fakehome/.claude/artifacts/logs/egress-guard.log"; then pw_seen=1; fi
+if [ "$pw_seen" -eq 0 ]; then
+  echo "PASS the password in a blocked URL is in neither the output nor the egress log"
+else
+  echo "FAIL the password in a blocked URL is in neither the output nor the egress log"
+  fails=$((fails + 1))
+fi
+
 # source: 11-12 review: a webhook whose host is on the allow-list is a SEND and is allowed
 webhook_ok="$(payload mcp__example__webhook '{"url": "https://allowed.example/hook"}')"
 check 0 "webhook URL https://allowed.example/hook is allowed" "$webhook_ok" bash
@@ -329,7 +345,7 @@ quoted_evil="$(payload mcp__claude_ai_Gmail__send_email '{"to": "\"x@evil.exampl
 CHECK_OUT='Domain: evil.example' check 2 "an off-list address inside a quoted display name is blocked" "$quoted_evil" bash
 # source: 11-12 security review of 7afb44f, only the last pair of brackets was read
 two_brackets="$(payload mcp__claude_ai_Gmail__send_email '{"to": "<x@evil.example> <a@allowed.example>", "subject": "x"}')"
-check 2 "two bracketed addresses in one entry are blocked" "$two_brackets" bash
+CHECK_OUT='Domain: evil.example' check 2 "two bracketed addresses in one entry are blocked" "$two_brackets" bash
 # source: 11-12 security review of 7afb44f, an address before the brackets was read as a display name
 bare_before="$(payload mcp__claude_ai_Gmail__send_email '{"to": "x@evil.example <a@allowed.example>", "subject": "x"}')"
 CHECK_OUT='Domain: evil.example' check 2 "an off-list address before the brackets is blocked" "$bare_before" bash
@@ -400,6 +416,64 @@ elif [ "$inject_preexisted" -eq 0 ] && [ -e INJECTED ]; then
   fails=$((fails + 1))
 else
   echo "PASS tool name reached osascript only as an argument"
+fi
+
+# source: 11-12 review of 6e5d69b, a quoted display name with a comma under an unlisted field was not read as addresses
+contact_bad="$(payload mcp__claude_ai_Gmail__send_email '{"to": "a@allowed.example", "contact": "\"Smith, Bob\" <x@evil.example>"}')"
+CHECK_OUT='Domain: evil.example' check 2 "an off-list address under contact is blocked" "$contact_bad" bash
+
+# source: 11-12 review of 6e5d69b, an address in a name field inside a recipient was not checked
+name_bad="$(payload mcp__claude_ai_Gmail__send_email '{"to": [{"name": "x@evil.example", "email": "a@allowed.example"}]}')"
+CHECK_OUT='Domain: evil.example' check 2 "an off-list address in a recipient name is blocked" "$name_bad" bash
+
+# source: 11-12 review of 6e5d69b, a backslash-escaped quote was counted, so a balanced recipient was blocked
+escaped_quote="$(payload mcp__claude_ai_Gmail__send_email '{"to": "\"Bob \\\" Smith\" <a@allowed.example>", "subject": "x"}')"
+check 0 "a display name with an escaped quote is allowed" "$escaped_quote" bash
+
+# source: 11-12 review of 6e5d69b, prose fields that mention an address must stay allowed
+prose_fields="$(payload mcp__claude_ai_Gmail__send_email '{"to": "a@allowed.example", "subject": "write to x@evil.example", "body": "or y@evil.example"}')"
+check 0 "subject and body that mention addresses are not destinations" "$prose_fields" bash
+
+# source: 11-12 review of 6e5d69b, a tab in a URL under an unlisted field was neither a URL nor an address
+target_tab="$(payload mcp__example__webhook '{"url": "https://allowed.example/h", "target": "https://evil.example/\tx"}')"
+CHECK_OUT='control character' check 2 "a webhook target URL with a tab is blocked" "$target_tab" bash
+
+# source: 11-12 review of 6e5d69b, a newline in a FETCH URL under an unlisted field was never checked
+note_nl="$(payload WebFetch '{"url": "https://allowed.example/", "note": "https://evil.example/\nx"}')"
+CHECK_OUT='control character' check 2 "a fetch note URL with a newline is blocked" "$note_nl" bash
+
+# source: 11-12 review of 6e5d69b, a grep error during the address scan yielded no tokens and the send passed
+{
+  printf '%s\n' '#!/bin/sh'
+  printf '%s\n' 'for a in "$@"; do'
+  printf '%s\n' '  if [ "$a" = "-aoE" ]; then'
+  printf '%s\n' '    exit 2'
+  printf '%s\n' '  fi'
+  printf '%s\n' 'done'
+  printf '%s\n' 'exec /usr/bin/grep "$@"'
+} > "$TMP/bin/grep"
+chmod +x "$TMP/bin/grep"
+grep_fail="$(payload mcp__claude_ai_Gmail__send_email '{"to": "a@allowed.example", "subject": "x"}')"
+CHECK_OUT='the address scan could not run' check 2 "a grep error during the address scan blocks the send" "$grep_fail" bash
+rm -f "$TMP/bin/grep"
+
+# source: 11-12 review of 6e5d69b, install.sh said the allow-list starts empty on a reinstall that keeps domains
+inst_home="$(mktemp -d "$TMP/inst.XXXXXX")"
+inst_out="$(HOME="$inst_home" bash "$ROOT/install.sh" 2>&1)"
+if printf '%s' "$inst_out" | grep -F -q 'allowlist-domains.txt starts empty'; then
+  echo "PASS install.sh with no allow-list says it starts empty"
+else
+  echo "FAIL install.sh with no allow-list says it starts empty"
+  fails=$((fails + 1))
+fi
+mkdir -p "$inst_home/.claude"
+printf 'allowed.example\n' > "$inst_home/.claude/allowlist-domains.txt"
+inst_out="$(HOME="$inst_home" bash "$ROOT/install.sh" 2>&1)"
+if printf '%s' "$inst_out" | grep -F -q 'keeps its 1 domain.'; then
+  echo "PASS install.sh with one saved domain says the allow-list keeps its 1 domain"
+else
+  echo "FAIL install.sh with one saved domain says the allow-list keeps its 1 domain"
+  fails=$((fails + 1))
 fi
 
 [ "$fails" -eq 0 ] || { echo "$fails failed"; exit 1; }

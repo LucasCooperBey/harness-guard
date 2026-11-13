@@ -46,6 +46,8 @@ SECRET_RE_CI='(~/?\.ssh|/\.ssh/|id_rsa|id_ed25519|BEGIN [A-Z ]*PRIVATE KEY|secre
 ADDR_RE='^[^[:space:]@<>]+@[^[:space:]@<>]+$'
 ANGLE_CAP='<([^<>]+)>$'
 URL_RE='^[A-Za-z][A-Za-z0-9+.-]*://[^[:space:]]+$'
+# Not anchored: a token may sit inside a display name, a list, or another field.
+ADDR_TOKEN_RE='[^][[:space:],;<>"()]*@[^][[:space:],;<>"()]*'
 
 INPUT="$(cat 2>/dev/null || true)"
 DEST_JSON=""
@@ -157,6 +159,18 @@ list_in_use() {
 
 domain_allowed() { list_match "$1" "$ALLOWLIST"; }
 
+# A URL for a block message: the user info before the last @ in the authority becomes ***, so a
+# password written into a URL before its host never reaches stderr or the egress log.
+# source: 11-12 review, the user-info block printed the whole URL, password included
+redact_userinfo() {
+  local u="$1" re='^([A-Za-z][A-Za-z0-9+.-]*://)[^/?#]*@(.*)$'
+  if [[ "$u" =~ $re ]]; then
+    printf '%s***@%s' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+  else
+    printf '%s' "$u"
+  fi
+}
+
 # Host from a URL. Caller secret-scans the raw destination first.
 # Scheme is [A-Za-z][A-Za-z0-9+.-]*://. Authority runs to the first / ? # or backslash.
 # SEND: a raw backslash blocks, and an authority that holds @ blocks. FETCH: the host is
@@ -165,7 +179,7 @@ domain_allowed() { list_match "$1" "$ALLOWLIST"; }
 host_from_url() {
   local url="$1" class="$2" rest auth host
   if [[ "$class" == "send" && "$url" == *\\* ]]; then
-    block "URL contains a backslash, failing closed" "Dest: ${url:0:200}"
+    block "URL contains a backslash, failing closed" "Dest: $(redact_userinfo "${url:0:200}")"
   fi
   rest="$url"
   if [[ "$url" =~ ^[A-Za-z][A-Za-z0-9+.-]*:// ]]; then
@@ -173,7 +187,7 @@ host_from_url() {
   fi
   auth="${rest%%[/?#\\]*}"
   if [[ "$class" == "send" && "$auth" == *@* ]]; then
-    block "URL carries user info, failing closed" "Dest: ${url:0:200}"
+    block "URL carries user info, failing closed" "Dest: $(redact_userinfo "${url:0:200}")"
   fi
   if [[ "$class" == "fetch" ]]; then
     host="${auth##*@}"
@@ -201,28 +215,51 @@ trim_space() {
 }
 
 # Double-quoted display names are removed before splitting. A comma inside the quotes belongs
-# to the name, so "A, Person" <a@allowed.example> stays one address. Single quotes stay, so an
-# apostrophe in an address is not treated as a quote.
+# to the name, so "A, Person" <a@allowed.example> stays one address. A quote preceded by a
+# backslash stays inside the name, so "Bob \" Smith" <a@allowed.example> stays one address.
+# Single quotes stay, so an apostrophe in an address is not treated as a quote.
 strip_double_quotes() {
-  local s="$1" out="" i=0 c len
+  local s="$1" out="" i=0 c len prev
   len=${#s}
+  prev=""
   while [ "$i" -lt "$len" ]; do
     c="${s:$i:1}"
-    if [ "$c" = '"' ]; then
+    if [ "$c" = '"' ] && [ "$prev" != '\' ]; then
       i=$((i + 1))
+      prev=""
       while [ "$i" -lt "$len" ]; do
         c="${s:$i:1}"
-        i=$((i + 1))
-        if [ "$c" = '"' ]; then
+        if [ "$c" = '"' ] && [ "$prev" != '\' ]; then
+          i=$((i + 1))
+          prev=""
           break
         fi
+        prev="$c"
+        i=$((i + 1))
       done
     else
       out="${out}${c}"
+      prev="$c"
       i=$((i + 1))
     fi
   done
   printf '%s' "$out"
+}
+
+# How many double quotes are not preceded by a backslash.
+unescaped_quotes() {
+  local s="$1" i=0 c prev n
+  prev=""
+  n=0
+  while [ "$i" -lt "${#s}" ]; do
+    c="${s:$i:1}"
+    if [ "$c" = '"' ] && [ "$prev" != '\' ]; then
+      n=$((n + 1))
+    fi
+    prev="$c"
+    i=$((i + 1))
+  done
+  printf '%s' "$n"
 }
 
 # $1 address, $2 field name. Exactly one @, then the same domain rules as before.
@@ -249,23 +286,37 @@ accept_address() {
   checked=$((checked + 1))
 }
 
+# Address-shaped tokens in $1, each checked with accept_address. grep status 0 or 1 means the
+# scan finished. Any other status means it did not run, so the call fails closed.
+# source: 11-12 review of 6e5d69b, grep -oE with || true turned a scan error into no tokens
+accept_tokens_in() {
+  local raw="$1" key="$2" token rc found
+  found="$(printf '%s\n' "$raw" | grep -aoE "$ADDR_TOKEN_RE")"
+  rc=$?
+  if [[ "$rc" -gt 1 ]]; then
+    block "could not read a recipient, failing closed" "the address scan could not run"
+  fi
+  while IFS= read -r token || [[ -n "$token" ]]; do
+    [[ -z "$token" ]] && continue
+    accept_address "$token" "$key"
+  done < <(printf '%s\n' "$found")
+}
+
 # Split a recipient string on comma, semicolon and newline. Empty entries are skipped.
 # anything <addr> yields addr. One token with no whitespace is the address. Anything else blocks.
 consume_recipient_text() {
-  local raw="$1" key="$2" stripped entries entry addr found=0 quotes tokens token
+  local raw="$1" key="$2" stripped entries entry addr found=0 qcount
   # Every address-shaped token in the raw value must pass, wherever it sits: inside quotes, before
   # the brackets or in a second pair of brackets. A mail tool may read any of them as the address,
   # so the structured parse below is a second check, never the only one.
   # source: 11-12 security review of 7afb44f, "x@evil.example" <a@allowed.example> passed
-  quotes="${raw//[^\"]/}"
-  if (( ${#quotes} % 2 )); then
+  # A quote preceded by a backslash is the character ", not a delimiter.
+  # source: 11-12 review of 6e5d69b, "Bob \" Smith" <a@allowed.example> was blocked
+  qcount="$(unescaped_quotes "$raw")"
+  if (( qcount % 2 )); then
     block "could not read a recipient, failing closed" "field ${key:-recipient} has an unbalanced double quote"
   fi
-  tokens="$(printf '%s\n' "$raw" | grep -oE '[^][[:space:],;<>"()]*@[^][[:space:],;<>"()]*' || true)"
-  while IFS= read -r token || [[ -n "$token" ]]; do
-    [[ -z "$token" ]] && continue
-    accept_address "$token" "$key"
-  done < <(printf '%s\n' "$tokens")
+  accept_tokens_in "$raw" "$key"
   stripped="$(strip_double_quotes "$raw")"
   entries="$(printf '%s' "$stripped" | tr $',;\n' '\n')"
   while IFS= read -r entry || [[ -n "$entry" ]]; do
@@ -321,15 +372,46 @@ whole_is_addresses() {
 }
 
 # One JSON object for tool_input. ctrl is decided here, on the decoded string, before the shell
-# can split a URL on a newline. Recipient keys keep the previous name rule. Subtrees named from,
-# sender, reply_to or replyTo are ignored. Name, displayName, display_name and label leaves inside
-# a recipient value are ignored. Any other string that is entirely a URL is a destination too.
+# can split a URL on a newline. A string that starts with a scheme and :// and holds a control
+# character counts, even when a tab or a newline means it is not a whole URL.
+# Recipient keys keep the previous name rule. Subtrees named from, sender, reply_to or replyTo
+# are ignored there. Name, displayName, display_name and label leaves inside a recipient value
+# are ignored by that parse. Any other string that is entirely a URL is a destination too.
+# addrs is a third list: every string leaf except those subtrees and except the prose fields
+# subject, body, text, content, message, html and description. The shell checks each leaf for
+# address-shaped tokens, so a name or an unlisted field is not a way around the allow-list.
 collect_destinations() {
   DEST_JSON="$(printf '%s' "$INPUT" | jq -c '
     def skipkey: ascii_downcase | test("^(from|sender|reply_?to)$");
     def rkey: ascii_downcase
       | test("^(to|cc|bcc|recipients?|emails?|address(es)?|(to|cc|bcc)_?(recipients?|address(es)?|emails?|list))$");
     def namekey: ascii_downcase | test("^(name|displayname|display_name|label)$");
+    def prosekey: ascii_downcase | test("^(subject|body|text|content|message|html|description)$");
+    def scheme_start:
+      if type != "string" then false
+      else test("^[A-Za-z][A-Za-z0-9+.-]*://")
+      end;
+    def walk_strings:
+      if type == "object" then to_entries[] | .value | walk_strings
+      elif type == "array" then .[] | walk_strings
+      elif type == "string" then .
+      else empty
+      end;
+    def walk_addr($prose):
+      if type == "object" then
+        to_entries[]
+        | select(.key | skipkey | not)
+        | (.key | prosekey) as $p
+        | .value | walk_addr($p)
+      elif type == "array" then
+        if $prose then .[] | if type == "object" or type == "array" then walk_addr(false) else empty end
+        else .[] | walk_addr(false)
+        end
+      elif type == "string" then
+        if $prose or . == "" then empty else .
+        end
+      else empty
+      end;
     def is_nonempty:
       if . == null then false
       elif type == "string" then . != ""
@@ -394,11 +476,13 @@ collect_destinations() {
       | map(select(. != null and . != "") | if type == "string" then . else tostring end) as $known
     | [ $known[], ($whole[] | trimspace) ] | map(select(. != "")) | unique as $urls
     | [ $known[], $whole[] ] as $raws
+    | [ $in | walk_addr(false) ] as $addrs
     | {
-        ctrl: any($raws[]; has_ctrl),
+        ctrl: (any($raws[]; has_ctrl) or any($in | walk_strings; scheme_start and has_ctrl)),
         urls: $urls,
         recips: $recips,
-        strays: $strays
+        strays: $strays,
+        addrs: $addrs
       }
   ' 2>/dev/null)" || return 1
 }
@@ -414,7 +498,7 @@ refuse_control_urls() {
 
 # Every recipient address and every URL must be on the allow-list. A send with neither blocks.
 guard_send() {
-  local recs rec key text stray_lines stray_json stray urls u accepted="" checked=0
+  local recs rec key text stray_lines stray_json stray urls u addr_lines addr_json addr_text accepted="" checked=0
   collect_destinations || block "could not read the tool call, failing closed" "jq could not read the tool call"
   refuse_control_urls
   urls="$(printf '%s' "$DEST_JSON" | jq -r '.urls[]' 2>/dev/null)" || block "could not read the tool call, failing closed" "jq could not read the URL fields"
@@ -458,6 +542,18 @@ guard_send() {
     accepted="${accepted:+$accepted }$DOMAIN"
     checked=$((checked + 1))
   done < <(printf '%s\n' "$urls")
+  # Third check, after the URL host rules so a userinfo URL still reports that block.
+  # Every string leaf except the prose fields and the from/sender/reply_to/replyTo subtrees.
+  # source: 11-12 review of 6e5d69b, an address in name or in an unlisted field was not a destination
+  addr_lines="$(printf '%s' "$DEST_JSON" | jq -c '.addrs[]' 2>/dev/null)" || block "could not read the tool call, failing closed" "jq could not read a string field"
+  if [[ -n "$addr_lines" ]]; then
+    while IFS= read -r addr_json || [[ -n "$addr_json" ]]; do
+      [[ -z "$addr_json" ]] && continue
+      addr_text="$(printf '%s' "$addr_json" | jq -r '.' 2>/dev/null)" || block "could not read the tool call, failing closed" "jq could not read a string field"
+      [[ -z "$addr_text" ]] && continue
+      accept_tokens_in "$addr_text" "value"
+    done < <(printf '%s\n' "$addr_lines")
+  fi
   if [[ "$checked" -eq 0 ]]; then
     block "could not read recipient of a SEND tool, failing closed" "tool_input had no recipient or URL field"
   fi

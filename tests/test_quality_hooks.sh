@@ -44,16 +44,21 @@ case "$msg" in
 esac
 
 # source: 11-12 review of c69dc2f, the quality gate failed open when it could not enter the project folder
+# source: 11-12 review of 6e5d69b, chmod 000 does not stop cd when the user is root
 # The hook sets PROJECT_ROOT from CLAUDE_PROJECT_DIR when that is set, else pwd.
-LOCKED_DIR="$(mktemp -d "$TMP/locked.XXXXXX")"
-printf '%s\n' '{"name":"quality-gate-fixture"}' > "$LOCKED_DIR/package.json"
-chmod 000 "$LOCKED_DIR"
-qg_out="$(printf '%s' '{"tool_input":{"command":"git commit -m x"}}' | CLAUDE_PROJECT_DIR="$LOCKED_DIR" bash "$HOOKS/pre-commit-quality-gate.sh" 2>&1)"
-qg_status=$?
-if [ "$qg_status" -eq 2 ] && printf '%s' "$qg_out" | grep -F -q -- "$LOCKED_DIR" && printf '%s' "$qg_out" | grep -F -q "blocked" && printf '%s' "$qg_out" | grep -F -q "could not run"; then
-  pass "the quality gate blocks when it cannot enter the project folder"
+if [ "$(id -u)" -eq 0 ]; then
+  echo "SKIP the quality gate cannot-enter test needs a non-root user"
 else
-  bad "the quality gate blocks when it cannot enter the project folder (status $qg_status): ${qg_out:0:300}"
+  LOCKED_DIR="$(mktemp -d "$TMP/locked.XXXXXX")"
+  printf '%s\n' '{"name":"quality-gate-fixture"}' > "$LOCKED_DIR/package.json"
+  chmod 000 "$LOCKED_DIR"
+  qg_out="$(printf '%s' '{"tool_input":{"command":"git commit -m x"}}' | CLAUDE_PROJECT_DIR="$LOCKED_DIR" bash "$HOOKS/pre-commit-quality-gate.sh" 2>&1)"
+  qg_status=$?
+  if [ "$qg_status" -eq 2 ] && printf '%s' "$qg_out" | grep -F -q -- "$LOCKED_DIR" && printf '%s' "$qg_out" | grep -F -q "blocked" && printf '%s' "$qg_out" | grep -F -q "could not run"; then
+    pass "the quality gate blocks when it cannot enter the project folder"
+  else
+    bad "the quality gate blocks when it cannot enter the project folder (status $qg_status): ${qg_out:0:300}"
+  fi
 fi
 
 if [ "$fail" -ne 0 ]; then exit 1; fi

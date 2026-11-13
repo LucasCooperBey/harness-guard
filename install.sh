@@ -18,7 +18,26 @@ for f in "$SRC"/*.sh; do
   echo "  ✓ $name"
 done
 
-echo 'egress-guard: ~/.claude/allowlist-domains.txt starts empty, so every send is blocked until you add the domains you send to.'
+# Domain lines, counted the way the hook reads them: drop a trailing CR, trim spaces,
+# and skip blanks and comments. Missing, or none of those lines, means it is still empty.
+allowlist="$HOME/.claude/allowlist-domains.txt"
+domain_lines=0
+if [[ -f "$allowlist" ]]; then
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    entry="${line%$'\r'}"
+    entry="${entry#"${entry%%[![:space:]]*}"}"
+    entry="${entry%"${entry##*[![:space:]]}"}"
+    [[ -z "$entry" || "$entry" =~ ^# ]] && continue
+    domain_lines=$((domain_lines + 1))
+  done < "$allowlist"
+fi
+if [[ "$domain_lines" -eq 0 ]]; then
+  echo 'egress-guard: ~/.claude/allowlist-domains.txt starts empty, so every send is blocked until you add the domains you send to.'
+else
+  domain_word=domains
+  [[ "$domain_lines" -eq 1 ]] && domain_word=domain
+  echo "egress-guard: the allow-list keeps its $domain_lines $domain_word."
+fi
 
 echo ""
 echo "Setting hook-integrity baseline…"
