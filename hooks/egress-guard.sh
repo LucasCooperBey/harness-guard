@@ -164,8 +164,11 @@ domain_allowed() { list_match "$1" "$ALLOWLIST"; }
 # is optional, and the redaction runs on the whole value before it is cut to 200 characters.
 # source: 11-12 review, the user-info block printed the whole URL, password included
 # source: 11-12 review of a121d06, a cut before the redaction could leave the start of a long password
+# Everything up to the last @ is hidden, so a password holding an unencoded / ? or # is hidden
+# too; an @ in a path hides a little more than needed, which a block message can afford.
+# source: 11-12 review of aeb448c, a URL password holding a slash was kept
 redact_userinfo() {
-  local u="$1" re='^([A-Za-z][A-Za-z0-9+.-]*://)?[^/?#]*@(.*)$' out
+  local u="$1" re='^([A-Za-z][A-Za-z0-9+.-]*://)?.*@(.*)$' out
   if [[ "$u" =~ $re ]]; then
     out="${BASH_REMATCH[1]}***@${BASH_REMATCH[2]}"
   else
@@ -174,15 +177,26 @@ redact_userinfo() {
   printf '%s' "${out:0:200}"
 }
 
-# An address token for a block message. A token whose part before the last @ holds : or / is
-# URL-shaped, so only ***@ and what follows the @ is shown.
+# An address token for a block message: only ***@ and what follows the last @ is shown. The
+# token comes from a tokenizer that splits on ; and , so the part before the @ can be the tail
+# of a URL password, and the domain is what the allow-list decides on.
 # source: 11-12 security review of a121d06, an address-shaped token could carry a URL password
+# source: 11-12 security review of aeb448c, a URL password holding ; showed its tail
 shown_addr() {
-  local a="$1" before="${1%@*}"
-  case "$before" in
-    *[:/]*) a="***@${a##*@}" ;;
-  esac
+  local a="***@${1##*@}"
   printf '%s' "${a:0:160}"
+}
+
+# A host or domain for a block message, with everything after its first : hidden. A
+# URL whose password holds a slash has no @ in its authority, so the host read from it is
+# the user name, a colon and the start of the password.
+# source: 11-12 stub run of aeb448c, the host-character block printed the password
+shown_host() {
+  local h="$1"
+  case "$h" in
+    *:*) h="${h%%:*}:***" ;;
+  esac
+  printf '%s' "${h:0:160}"
 }
 
 # Host from a URL. Caller secret-scans the raw destination first.
@@ -215,7 +229,7 @@ host_from_url() {
   host="${host%.}"
   if [[ "$class" == "send" ]]; then
     if [[ ! "$host" =~ ^[a-z0-9.-]+$ ]]; then
-      block "URL host has characters outside the allowed set, failing closed" "Host: $host"
+      block "URL host has characters outside the allowed set, failing closed" "Host: $(shown_host "$host")  Dest: $(redact_userinfo "$url")"
     fi
   fi
   DOMAIN="$host"
@@ -291,7 +305,7 @@ accept_address() {
   domain="$(printf '%s' "$domain" | tr '[:upper:]' '[:lower:]')"
   domain="${domain%.}"
   if [[ ! "$domain" =~ ^[a-z0-9.-]+$ ]]; then
-    block "recipient domain has characters outside the allowed set, failing closed" "Domain: $domain"
+    block "recipient domain has characters outside the allowed set, failing closed" "Domain: $(shown_host "$domain")"
   fi
   if ! domain_allowed "$domain"; then
     block "SEND to a domain not on the allow-list" "Domain: $domain  Dest: $(shown_addr "$addr")"
@@ -394,13 +408,18 @@ whole_is_addresses() {
 # addrs is a third list: every string leaf except those subtrees and except the prose fields
 # subject, body, text, content, message, html and description. The shell checks each leaf for
 # address-shaped tokens, so a name or an unlisted field is not a way around the allow-list.
+# A string directly under an id field (inReplyTo, references, messageId, threadId, attachments,
+# filename, file_path, path), or in an array there, is skipped unless it has the scp shape
+# user@host:path, which counts as user@host. An object under an id field is walked as usual.
+# The control-character rule reads every string leaf except the prose fields, from and sender
+# included.
 collect_destinations() {
   DEST_JSON="$(printf '%s' "$INPUT" | jq -c '
     def skipkey: ascii_downcase | test("^(from|sender|reply_?to)$");
     def rkey: ascii_downcase
       | test("^(to|cc|bcc|recipients?|emails?|address(es)?|(to|cc|bcc)_?(recipients?|address(es)?|emails?|list))$");
     def namekey: ascii_downcase | test("^(name|displayname|display_name|label)$");
-    def prosekey: ascii_downcase | test("^(subject|body|text|content|message|html|description|prompt|query)$");
+    def prosekey: ascii_downcase | test("^(subject|body|text|content|message|html|description)$");
     # Message ids, thread ids and attachment names can hold an @ and are never destinations.
     # source: 11-12 review of a121d06, an inReplyTo Message-ID and img@2x.png blocked a reply
     def idkey: ascii_downcase | test("^(in_?reply_?to|references|message_?id|thread_?id|attachments?|file_?name|file_?path|path)$");
@@ -408,12 +427,22 @@ collect_destinations() {
       if type != "string" then false
       else test("^[A-Za-z][A-Za-z0-9+.-]*://")
       end;
+    # source: 11-12 security review of aeb448c, a path of user@evil:/x was never checked
+    def scp_addr: capture("^(?<a>[^@[:space:]/]+@[^@[:space:]:/]+):").a;
     def walk_addr($prose):
+      # source: 11-12 security review of aeb448c, an object under attachments was skipped whole
+      def id_addr:
+        if type == "object" then walk_addr(false)
+        elif type == "array" then .[] | id_addr
+        elif type == "string" then scp_addr
+        else empty
+        end;
       if type == "object" then
         to_entries[]
-        | select(.key | (skipkey or idkey) | not)
-        | (.key | prosekey) as $p
-        | .value | walk_addr($p)
+        | select(.key | skipkey | not)
+        | if (.key | idkey) then .value | id_addr
+          else (.key | prosekey) as $p | .value | walk_addr($p)
+          end
       elif type == "array" then
         if $prose then .[] | if type == "object" or type == "array" then walk_addr(false) else empty end
         else .[] | walk_addr(false)
@@ -459,14 +488,33 @@ collect_destinations() {
       else empty
       end;
     def walk_strays:
+      def id_strays:
+        if type == "object" then walk_strays
+        elif type == "array" then .[] | id_strays
+        else empty
+        end;
       if type == "object" then
         to_entries[]
-        | select(.key | (skipkey or idkey) | not)
+        | select(.key | skipkey | not)
         | if (.key | rkey) then empty
+          elif (.key | idkey) then .value | id_strays
           else .value | walk_strays
           end
       elif type == "array" then .[] | walk_strays
       elif type == "string" then select(looks_like_url | not)
+      else empty
+      end;
+    # Every string leaf except prose, for the control-character rule.
+    # source: 11-12 security review of aeb448c, a tab in a URL under from was no longer refused
+    def walk_ctrl($prose):
+      if type == "object" then
+        to_entries[] | (.key | prosekey) as $p | .value | walk_ctrl($p)
+      elif type == "array" then
+        if $prose then .[] | if type == "object" or type == "array" then walk_ctrl(false) else empty end
+        else .[] | walk_ctrl(false)
+        end
+      elif type == "string" then
+        if $prose then empty else . end
       else empty
       end;
     def walk_urls:
@@ -489,7 +537,7 @@ collect_destinations() {
     | [ $known[], $whole[] ] as $raws
     | [ $in | walk_addr(false) ] as $addrs
     | {
-        ctrl: (any($raws[]; has_ctrl) or any($in | walk_addr(false); scheme_start and has_ctrl)),
+        ctrl: (any($raws[]; has_ctrl) or any($in | walk_ctrl(false); scheme_start and has_ctrl)),
         urls: $urls,
         recips: $recips,
         strays: $strays,
@@ -509,7 +557,7 @@ refuse_control_urls() {
 
 # Every recipient address and every URL must be on the allow-list. A send with neither blocks.
 guard_send() {
-  local recs rec key text stray_lines stray_json stray urls u addr_text checked_before accepted="" checked=0
+  local recs rec key text stray_lines stray_json stray urls u addr_text checked_before accepted_before accepted="" checked=0
   collect_destinations || block "could not read the tool call, failing closed" "jq could not read the tool call"
   refuse_control_urls
   urls="$(printf '%s' "$DEST_JSON" | jq -r '.urls[]' 2>/dev/null)" || block "could not read the tool call, failing closed" "jq could not read the URL fields"
@@ -563,8 +611,10 @@ guard_send() {
   addr_text="$(printf '%s' "$DEST_JSON" | jq -r '.addrs | join("\n")' 2>/dev/null)" || block "could not read the tool call, failing closed" "jq could not read a string field"
   if [[ -n "$addr_text" ]]; then
     checked_before="$checked"
+    accepted_before="$accepted"
     accept_tokens_in "$addr_text" "value"
     checked="$checked_before"
+    accepted="$accepted_before"
   fi
   if [[ "$checked" -eq 0 ]]; then
     block "could not read recipient of a SEND tool, failing closed" "tool_input had no recipient or URL field"
