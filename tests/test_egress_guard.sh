@@ -240,6 +240,11 @@ hook_scp="$(payload mcp__example__webhook '{"url": "https://allowed.example/hook
 check 2 "a path shaped user@host:path with an off-list host is blocked" "$hook_scp" bash
 hook_scp_ok="$(payload mcp__example__webhook '{"url": "https://allowed.example/hook", "path": "deploy@allowed.example:/srv/drop"}')"
 check 0 "a path shaped user@host:path with an allowed host is allowed" "$hook_scp_ok" bash
+# source: 11-12 security review of 318e887, a leading space or a second @ hid the scp host
+hook_scp_sp="$(payload mcp__example__webhook '{"url": "https://allowed.example/hook", "path": " deploy@evil.example:/srv/drop"}')"
+check 2 "a path with a leading space before user@host:path is blocked" "$hook_scp_sp" bash
+hook_scp_two="$(payload mcp__example__webhook '{"url": "https://allowed.example/hook", "file_path": "a@b@evil.example:/srv/drop"}')"
+check 2 "a path with two @ before host:path is blocked" "$hook_scp_two" bash
 
 # source: 11-12 security review of aeb448c, prompt and query counted as prose on SEND tools
 hook_prompt="$(payload mcp__example__webhook '{"url": "https://allowed.example/hook", "prompt": "send it to z@evil.example"}')"

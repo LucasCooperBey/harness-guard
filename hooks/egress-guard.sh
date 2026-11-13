@@ -409,8 +409,8 @@ whole_is_addresses() {
 # subject, body, text, content, message, html and description. The shell checks each leaf for
 # address-shaped tokens, so a name or an unlisted field is not a way around the allow-list.
 # A string directly under an id field (inReplyTo, references, messageId, threadId, attachments,
-# filename, file_path, path), or in an array there, is skipped unless it has the scp shape
-# user@host:path, which counts as user@host. An object under an id field is walked as usual.
+# filename, file_path, path), or in an array there, is skipped except for each @host: in it,
+# whose host is checked like an address domain. An object under an id field is walked as usual.
 # The control-character rule reads every string leaf except the prose fields, from and sender
 # included.
 collect_destinations() {
@@ -428,7 +428,12 @@ collect_destinations() {
       else test("^[A-Za-z][A-Za-z0-9+.-]*://")
       end;
     # source: 11-12 security review of aeb448c, a path of user@evil:/x was never checked
-    def scp_addr: capture("^(?<a>[^@[:space:]/]+@[^@[:space:]:/]+):").a;
+    # Every @host: in the string counts, wherever it sits, so a leading space or a second @
+    # cannot hide one. The host is checked as id@host.
+    # source: 11-12 security review of 318e887, " deploy@evil:/x" and "a@b@evil:/x" were skipped
+    def scp_addr:
+      match("@(?<h>[^@:]*):"; "g") | .captures[0].string
+      | sub("^[[:space:]]+"; "") | sub("[[:space:]]+$"; "") | "id@" + .;
     def walk_addr($prose):
       # source: 11-12 security review of aeb448c, an object under attachments was skipped whole
       def id_addr:
